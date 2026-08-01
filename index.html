@@ -130,8 +130,8 @@
 
     <div class="grid md:grid-cols-2 gap-4">
       <div>
-        <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Keyword</label>
-        <input id="grid-kw" placeholder="e.g. restaurant" autocomplete="off" class="field mt-1.5">
+        <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Keywords <span class="text-slate-600 normal-case tracking-normal">(comma = multiple)</span></label>
+        <input id="grid-kw" placeholder="e.g. restaurant, cafe, kopitiam" autocomplete="off" class="field mt-1.5">
         <div class="flex items-center gap-2 mt-2">
           <span id="sug-label" class="mono text-[9px] text-slate-600 uppercase tracking-widest">—</span>
           <span id="sug-spinner" class="hidden w-3 h-3 border-2 border-[#E8751A] border-t-transparent rounded-full animate-spin"></span>
@@ -148,8 +148,7 @@
       </div>
     </div>
 
-    <div class="flex items-center justify-between mt-4">
-      <p class="mono text-[10px] text-slate-600">TWO-PASS · FIND UP TO 60 FIRST · CONTINUE DEEP-SWEEPS THE REST AUTOMATICALLY</p>
+    <div class="flex items-center justify-end mt-4">
       <button onclick="toggleAdv()" class="mono text-[10px] text-slate-400 hover:text-white border border-white/10 px-3 py-1 rounded-lg transition-colors">⚙ ADVANCED</button>
     </div>
     <div id="adv-panel" class="hidden grid md:grid-cols-2 gap-4 mt-4">
@@ -280,7 +279,6 @@
 <script>
 /* ================= config ================= */
 const API_URL = 'https://places.googleapis.com/v1/places:searchText';
-const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
 const EMBEDDED_KEY = 'AIzaSyBR_uiUSfGZtbk7Nu89sWm7ESTPfMWedFg';
 const EXPECTED_ORIGIN = 'https://places-lead-finder-site.vercel.app';
 const FREE_CAP = 5000;
@@ -303,7 +301,7 @@ const SUFFIX_FALLBACK = ['supplier', 'shop', 'service', 'company', 'store', 'who
 let rows = [], seen = new Set(), running = false, stopFlag = false, sugTimer = null;
 let liveUsage = null;
 let gridCenters = []; /* [{name, lat, lng, bbox}] */
-let deepAreas = [];   /* areas that hit the 60 cap — need the deep sweep */
+let deepPairs = [];   /* (keyword × area) combos that hit the 60 cap — need the deep sweep */
 let advanced = false;
 let curKw = '', curRegion = 'my', curMobile = false;
 let fetched = 0, dup = 0, closed = 0, nonmobile = 0, outRange = 0, req = 0;
@@ -336,30 +334,6 @@ if (!onOfficialDomain) {
 }
 
 /* ================= suggestions ================= */
-async function fetchSuggestions(kw) {
-  try {
-    const r = await fetch(GEMINI_URL + '?key=' + encodeURIComponent(EMBEDDED_KEY), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text:
-          `You are a Google Maps search assistant for Malaysia. Input search keyword: "${kw}". ` +
-          'Return 8 related search keywords that would find similar/competing businesses on Google Maps, ' +
-          'mixing English, Malay (e.g. kedai makan, kedai runcit) and Chinese where natural. ' +
-          'Return ONLY a JSON array of strings, no other text.' }] }],
-        generationConfig: { responseMimeType: 'application/json', temperature: 0.7 }
-      })
-    });
-    if (!r.ok) throw new Error('gemini ' + r.status);
-    const j = await r.json();
-    const txt = (j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts && j.candidates[0].content.parts[0].text) || '[]';
-    const arr = JSON.parse(txt.replace(/```json|```/g, '').trim());
-    return Array.isArray(arr) ? arr.map(s => String(s).trim()).filter(Boolean).slice(0, 8) : [];
-  } catch (e) {
-    console.warn('AI suggestions unavailable:', e.message);
-    return [];
-  }
-}
 function localSuggestions(kw) {
   const k = kw.toLowerCase().trim();
   if (SUGGESTION_DICT[k]) return SUGGESTION_DICT[k];
@@ -381,16 +355,14 @@ function debounceSuggest() {
     renderChips(recent, true);
     return;
   }
+  const base = kw.includes(',') ? kw.split(',').pop().trim() : kw;
   label.textContent = 'SUGGESTIONS — CLICK TO FILL';
   spinner.classList.remove('hidden');
   renderChips([]);
-  sugTimer = setTimeout(async () => {
-    let list = await fetchSuggestions(kw);
-    const usedAI = list.length > 0;
-    if (!list.length) list = localSuggestions(kw);
-    renderChips(list, !usedAI);
+  sugTimer = setTimeout(() => {
+    renderChips(localSuggestions(base), true);
     spinner.classList.add('hidden');
-  }, 600);
+  }, 300);
 }
 
 /* ================= area locating ================= */
@@ -543,8 +515,9 @@ async function runSearch() {
   if (!onOfficialDomain) { showRunStatus('✖ SEARCH DISABLED — OPEN THE OFFICIAL URL'); return; }
   if (currentUsage() >= FREE_CAP) { showRunStatus('🛑 MONTHLY CAP REACHED (5,000).'); return; }
 
-  const kw = document.getElementById('grid-kw').value.trim();
-  if (!kw) { alert('Enter a keyword first.'); return; }
+  const kwInput = document.getElementById('grid-kw').value.trim();
+  const kws = kwInput.split(',').map(s => s.trim()).filter(Boolean);
+  if (!kws.length) { alert('Enter a keyword first.'); return; }
   const names = document.getElementById('grid-area').value.split(',').map(s => s.trim()).filter(Boolean);
   if (!gridCenters.length) {
     if (!names.length) { alert('Enter area name(s), e.g. "Desa Petaling, Shah Alam".'); return; }
@@ -553,27 +526,30 @@ async function runSearch() {
   }
   if (!gridCenters.length) { alert('Could not locate any area — try a different name.'); return; }
 
-  curKw = kw; curRegion = document.getElementById('region').value; curMobile = document.getElementById('mobile-only').checked;
-  rows = []; seen = new Set(); deepAreas = [];
+  curKw = kwInput; curRegion = document.getElementById('region').value; curMobile = document.getElementById('mobile-only').checked;
+  rows = []; seen = new Set(); deepPairs = [];
   fetched = 0; dup = 0; closed = 0; nonmobile = 0; outRange = 0; req = 0;
   document.getElementById('tbody').innerHTML = '';
   document.getElementById('empty-state').classList.add('hidden');
   document.getElementById('deep-btn').classList.add('hidden');
   syncStats();
-  rememberKeyword(kw);
+  for (const k of kws) rememberKeyword(k);
 
   running = true; stopFlag = false;
   document.getElementById('run-btn').classList.add('hidden');
   document.getElementById('stop-btn').classList.remove('hidden');
 
-  /* ===== PASS 1: plain "kw in area" — the familiar cheap flow (up to 60) ===== */
+  /* ===== PASS 1: plain "kw in area" for every keyword × area (up to 60 each) ===== */
+  const combos = [];
+  for (const a of gridCenters) for (const kw of kws) combos.push({ kw, a });
   outer:
-  for (let ai = 0; ai < gridCenters.length; ai++) {
-    const a = gridCenters[ai];
+  for (let ci2 = 0; ci2 < combos.length; ci2++) {
+    const combo = combos[ci2];
+    const a = combo.a, kw = combo.kw;
     let pageToken = null, pages = 0;
-    showRunStatus('▸ FIND ' + (ai + 1) + '/' + gridCenters.length + ' · ' + a.name + ' · PASS 1');
+    showRunStatus('▸ FIND ' + (ci2 + 1) + '/' + combos.length + ' · ' + kw + ' @ ' + a.name + ' · PASS 1');
     while (pages < 3 && running && !stopFlag && currentUsage() < FREE_CAP) {
-      const payload = { textQuery: curKw + ' in ' + a.name, pageSize: 20, languageCode: 'en', regionCode: curRegion };
+      const payload = { textQuery: kw + ' in ' + a.name, pageSize: 20, languageCode: 'en', regionCode: curRegion };
       if (pageToken) payload.pageToken = pageToken;
       let resp;
       try { resp = await apiFetch(payload); }
@@ -587,16 +563,17 @@ async function runSearch() {
       pageToken = data.nextPageToken || null;
       if (!pageToken) break;
     }
-    if (pages === 3) deepAreas.push(a); /* hit the 60 wall — more may exist */
+    if (pages === 3) deepPairs.push(combo); /* hit the 60 wall — more may exist */
   }
   syncStats();
 
   if (!running || stopFlag) { finishSearch('■ STOPPED BY USER'); return; }
 
-  if (deepAreas.length) {
+  if (deepPairs.length) {
     /* prompt the user to continue — transparency on usage */
     let estReq = 0;
-    for (const a of deepAreas) {
+    for (const pair of deepPairs) {
+      const a = pair.a;
       const { radiusKm, cellKm } = gridParamsFor(a);
       const radiusM = radiusKm * 1000, step = cellKm * 2000 * 0.9;
       let cells = 1;
@@ -605,9 +582,9 @@ async function runSearch() {
           if (!(dx === 0 && dy === 0) && Math.hypot(dx, dy) <= radiusM) cells++;
       estReq += 3 + Math.max(0, cells - 1) * 3;
     }
-    document.getElementById('deep-btn').textContent = '▶ CONTINUE DEEP SEARCH · ' + deepAreas.length + ' AREA(S) · ~' + estReq + ' REQ';
+    document.getElementById('deep-btn').textContent = '▶ CONTINUE DEEP SEARCH · ' + deepPairs.length + ' COMBO(S) · ~' + estReq + ' REQ';
     document.getElementById('deep-btn').classList.remove('hidden');
-    showRunStatus('⚠ ' + deepAreas.length + ' AREA(S) HIT THE 60 CAP — MORE MAY EXIST · CLICK CONTINUE TO SWEEP THEM ALL');
+    showRunStatus('⚠ ' + deepPairs.length + ' COMBO(S) HIT THE 60 CAP — MORE MAY EXIST · CLICK CONTINUE TO SWEEP THEM ALL');
   } else {
     finishSearch('✓ COMPLETE — ' + rows.length + ' COMPANIES · ' + gridCenters.length + ' AREAS · ' + req + ' REQ · ALL RESULTS');
   }
@@ -615,21 +592,22 @@ async function runSearch() {
 
 /* ===== PASS 2: deep grid sweep for capped areas (auto radius/cell) ===== */
 async function deepSearch() {
-  if (!deepAreas.length || !running) return;
+  if (!deepPairs.length || !running) return;
   document.getElementById('deep-btn').classList.add('hidden');
   document.getElementById('stop-btn').classList.remove('hidden');
   outer:
-  for (let i = 0; i < deepAreas.length; i++) {
+  for (let i = 0; i < deepPairs.length; i++) {
     if (!running || stopFlag) break outer;
     if (currentUsage() >= FREE_CAP) { showRunStatus('🛑 MONTHLY CAP REACHED (5,000).'); break outer; }
-    const a = deepAreas[i];
+    const pair = deepPairs[i];
+    const a = pair.a, kw = pair.kw;
     const { radiusKm, cellKm } = gridParamsFor(a);
     const radiusM = radiusKm * 1000;
-    showRunStatus('▸ DEEP ' + (i + 1) + '/' + deepAreas.length + ' · ' + a.name + ' · r=' + radiusKm + 'km · c=' + cellKm + 'km');
+    showRunStatus('▸ DEEP ' + (i + 1) + '/' + deepPairs.length + ' · ' + kw + ' @ ' + a.name + ' · r=' + radiusKm + 'km · c=' + cellKm + 'km');
 
     /* probe = center zone (paginated when dense) */
     let probeData;
-    const probePayload = { textQuery: curKw + ' in ' + a.name, pageSize: 20, languageCode: 'en', regionCode: curRegion,
+    const probePayload = { textQuery: kw + ' in ' + a.name, pageSize: 20, languageCode: 'en', regionCode: curRegion,
       locationBias: { circle: { center: { latitude: a.lat, longitude: a.lng }, radius: radiusM } } };
     try {
       const r = await apiFetch(probePayload);
@@ -642,7 +620,7 @@ async function deepSearch() {
 
     if (probeData.nextPageToken) {
       while (probeData.nextPageToken && running && !stopFlag && currentUsage() < FREE_CAP) {
-        const pagePayload = { textQuery: curKw + ' in ' + a.name, pageSize: 20, languageCode: 'en', regionCode: curRegion,
+        const pagePayload = { textQuery: kw + ' in ' + a.name, pageSize: 20, languageCode: 'en', regionCode: curRegion,
           locationBias: { circle: { center: { latitude: a.lat, longitude: a.lng }, radius: radiusM } }, pageToken: probeData.nextPageToken };
         let r2;
         try {
@@ -675,7 +653,7 @@ async function deepSearch() {
       showRunStatus('▸ DEEP ' + (i + 1) + '/' + deepAreas.length + ' · ' + a.name + ' · CELL ' + (ci + 1) + '/' + cells.length + ' · ' + fetched + ' FETCHED · ' + rows.length + ' KEPT');
       while (running && !stopFlag && currentUsage() < FREE_CAP) {
         pageNo++;
-        const payload = { textQuery: curKw + ' in ' + a.name, pageSize: 20, languageCode: 'en', regionCode: curRegion,
+        const payload = { textQuery: kw + ' in ' + a.name, pageSize: 20, languageCode: 'en', regionCode: curRegion,
           locationBias: { circle: { center: { latitude: c.lat, longitude: c.lng }, radius: cellKm * 1000 } } };
         if (pageToken) payload.pageToken = pageToken;
         let r3;
