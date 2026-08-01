@@ -125,7 +125,11 @@
       </div>
     </div>
 
-    <div class="grid md:grid-cols-3 gap-4 mt-4">
+    <div class="flex items-center justify-between mt-4">
+      <p class="mono text-[10px] text-slate-600">TWO-PASS · FIND UP TO 60 FIRST · CONTINUE DEEP-SWEEPS THE REST AUTOMATICALLY</p>
+      <button onclick="toggleAdv()" class="mono text-[10px] text-slate-400 hover:text-white border border-white/10 px-3 py-1 rounded-lg transition-colors">⚙ ADVANCED</button>
+    </div>
+    <div id="adv-panel" class="hidden grid md:grid-cols-2 gap-4 mt-4">
       <div>
         <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Radius <span class="text-slate-600">(km)</span></label>
         <input id="grid-radius" type="number" min="1" max="50" value="5" oninput="updateGridEst()" class="field mt-1.5 mono">
@@ -133,10 +137,7 @@
       <div>
         <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Cell Size <span id="cell-val" class="text-[#E8751A] font-bold">2</span> km</label>
         <input id="grid-cell" type="range" min="1" max="5" step="1" value="2" oninput="document.getElementById('cell-val').textContent=this.value;updateGridEst()" class="mt-3 w-full">
-        <p class="mono text-[9px] text-slate-600 mt-1">SMALLER CELL = MORE COVERAGE (MORE REQUESTS)</p>
-      </div>
-      <div class="flex items-end">
-        <p class="mono text-[10px] text-slate-600 pb-2 leading-relaxed">AUTO-GRID · EACH CELL = TOP 60 · GLOBAL DEDUP · SPARSE AREA = 1 REQ ONLY<br><span id="grid-est" class="text-[#E8751A]">~5 CELLS · 1-15 REQ</span></p>
+        <p class="mono text-[9px] text-slate-600 mt-1">AUTO (DEFAULT): CELL SIZED FROM THE AREA — NO TUNING NEEDED</p>
       </div>
     </div>
 
@@ -169,6 +170,10 @@
       <button id="run-btn" onclick="runSearch()"
         class="bg-gradient-to-r from-[#E8751A] to-[#F59E0B] hover:brightness-110 active:scale-[0.98] text-white mono font-bold text-sm px-7 py-3 rounded-xl glow-orange transition-all disabled:opacity-40 disabled:cursor-not-allowed">
         ▶ RUN SEARCH
+      </button>
+      <button id="deep-btn" onclick="deepSearch()"
+        class="hidden bg-gradient-to-r from-[#22D3EE] to-[#0EA5E9] hover:brightness-110 active:scale-[0.98] text-white mono font-bold text-sm px-6 py-3 rounded-xl shadow-md shadow-cyan-500/20 transition-all">
+        ▶ CONTINUE DEEP SEARCH
       </button>
       <button id="stop-btn" onclick="stopSearch()"
         class="hidden bg-white/5 hover:bg-white/10 border border-white/15 text-white mono font-bold text-sm px-6 py-3 rounded-xl transition-all">
@@ -235,7 +240,7 @@
       <div id="empty-state" class="py-20 text-center">
         <svg class="mx-auto w-10 h-10 mb-4 text-slate-700" fill="none" stroke="currentColor" stroke-width="1.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg>
         <p class="mono text-sm text-slate-500 tracking-widest">AWAITING INPUT</p>
-        <p class="mono text-[11px] text-slate-600 mt-2">KEYWORD + AREA → LOCATE → RUN · GRID SWEEP · GLOBAL DEDUP · CLOSED REMOVED</p>
+        <p class="mono text-[11px] text-slate-600 mt-2">KEYWORD + AREA → RUN · FIND UP TO 60 · CONTINUE FOR THE REST</p>
       </div>
     </div>
   </section>
@@ -270,7 +275,11 @@ const SUFFIX_FALLBACK = ['supplier', 'shop', 'service', 'company', 'store', 'who
 
 let rows = [], seen = new Set(), running = false, stopFlag = false, sugTimer = null;
 let liveUsage = null;
-let gridCenters = []; /* [{name, lat, lng}] */
+let gridCenters = []; /* [{name, lat, lng, bbox}] */
+let deepAreas = [];   /* areas that hit the 60 cap — need the deep sweep */
+let advanced = false;
+let curKw = '', curRegion = 'my', curMobile = false;
+let fetched = 0, dup = 0, closed = 0, nonmobile = 0, outRange = 0, req = 0;
 
 /* ================= domain check ================= */
 const onOfficialDomain = location.origin === EXPECTED_ORIGIN;
@@ -343,7 +352,12 @@ async function locateAreaName(name) {
     const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=my&q=' + encodeURIComponent(name));
     if (!r.ok) throw new Error('http ' + r.status);
     const j = await r.json();
-    if (j && j[0]) return { name, lat: parseFloat(j[0].lat), lng: parseFloat(j[0].lon) };
+    if (j && j[0]) return {
+      name,
+      lat: parseFloat(j[0].lat),
+      lng: parseFloat(j[0].lon),
+      bbox: (j[0].boundingbox || []).map(parseFloat)
+    };
   } catch (e) { console.warn('locate failed:', name, e.message); }
   return null;
 }
@@ -361,20 +375,28 @@ async function locateArea() {
   readout.innerHTML = found.length
     ? found.map(c => '● ' + esc(c.name) + ' → ' + c.lat.toFixed(4) + ', ' + c.lng.toFixed(4)).join('<br>')
     : '✖ NOT FOUND — TRY ANOTHER NAME';
-  updateGridEst();
 }
-function updateGridEst() {
-  const R = parseFloat(document.getElementById('grid-radius').value) || 5;
-  const c = parseInt(document.getElementById('grid-cell').value) || 2;
-  const radiusM = R * 1000, step = c * 2000 * 0.9;
-  let cells = 1;
-  for (let dy = -radiusM; dy <= radiusM; dy += step)
-    for (let dx = -radiusM; dx <= radiusM; dx += step)
-      if (!(dx === 0 && dy === 0) && Math.hypot(dx, dy) <= radiusM) cells++;
-  const centerCovered = c * 1000 <= radiusM;
-  const edge = centerCovered ? cells - 1 : cells;
-  const areas = gridCenters.length || (document.getElementById('grid-area').value.split(',').filter(s => s.trim()).length) || 1;
-  document.getElementById('grid-est').textContent = '~' + (cells * areas) + ' CELLS · ' + areas + '-' + (areas * (3 + edge * 3)) + ' REQ';
+function toggleAdv() {
+  advanced = !advanced;
+  document.getElementById('adv-panel').classList.toggle('hidden', !advanced);
+}
+function autoGridFromBBox(bbox, clat) {
+  if (!bbox || bbox.length < 4) return { radiusKm: 5, cellKm: 2 };
+  const latSpan = Math.abs(bbox[1] - bbox[0]) * 111;
+  const lngSpan = Math.abs(bbox[3] - bbox[2]) * 111 * Math.cos(clat * Math.PI / 180);
+  const size = Math.max(latSpan, lngSpan);
+  const radiusKm = Math.min(10, Math.max(2, Math.round(size * 0.75)));
+  const cellKm = Math.min(3, Math.max(1, Math.round(radiusKm / 2.5)));
+  return { radiusKm, cellKm };
+}
+function gridParamsFor(a) {
+  if (advanced) {
+    return {
+      radiusKm: parseFloat(document.getElementById('grid-radius').value) || 5,
+      cellKm: parseInt(document.getElementById('grid-cell').value) || 2
+    };
+  }
+  return autoGridFromBBox(a.bbox, a.lat);
 }
 
 /* ================= budget UI ================= */
@@ -421,7 +443,7 @@ function rememberKeyword(k) {
   localStorage.setItem('places_recent_kw', JSON.stringify(recent));
 }
 
-/* ================= phone helpers ================= */
+/* ================= phone / geo helpers ================= */
 function phoneOf(p) { return p.nationalPhoneNumber || p.internationalPhoneNumber || ''; }
 function isMobile(ph) {
   if (!ph) return false;
@@ -429,8 +451,6 @@ function isMobile(ph) {
   if (d.startsWith('60') && d.length >= 10) d = '0' + d.slice(2);
   return d.startsWith('01');
 }
-
-/* ================= geo helpers ================= */
 function distM(lat1, lng1, lat2, lng2) {
   const R = 6371000, toRad = Math.PI / 180;
   const dLat = (lat2 - lat1) * toRad, dLng = (lng2 - lng1) * toRad;
@@ -440,6 +460,33 @@ function distM(lat1, lng1, lat2, lng2) {
 
 /* ================= search ================= */
 function showRunStatus(t) { document.getElementById('run-status').textContent = t; }
+function syncStats() {
+  document.getElementById('st-req').textContent = req;
+  document.getElementById('st-fetched').textContent = fetched;
+  document.getElementById('st-unique').textContent = rows.length;
+  document.getElementById('st-dup').textContent = dup;
+  document.getElementById('st-closed').textContent = closed;
+  document.getElementById('st-nonmobile').textContent = nonmobile;
+  document.getElementById('st-outrange').textContent = outRange;
+  updateExportState();
+}
+function processPlaces(places, a, radiusM, doFilter) {
+  let added = 0;
+  for (const p of places || []) {
+    fetched++;
+    if (p.businessStatus === 'CLOSED_PERMANENTLY') { closed++; continue; }
+    if (seen.has(p.id)) { dup++; continue; }
+    seen.add(p.id);
+    if (curMobile && !isMobile(phoneOf(p))) { nonmobile++; continue; }
+    if (doFilter && p.location && distM(a.lat, a.lng, p.location.latitude, p.location.longitude) > radiusM) { outRange++; continue; }
+    rows.push(p); appendRow(p, rows.length); added++;
+  }
+  return added;
+}
+async function apiFetch(payload) {
+  const resp = await fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': EMBEDDED_KEY, 'X-Goog-FieldMask': FIELDS }, body: JSON.stringify(payload) });
+  return resp;
+}
 
 async function runSearch() {
   if (!onOfficialDomain) { showRunStatus('✖ SEARCH DISABLED — OPEN THE OFFICIAL URL'); return; }
@@ -455,147 +502,157 @@ async function runSearch() {
   }
   if (!gridCenters.length) { alert('Could not locate any area — try a different name.'); return; }
 
-  const radiusKm = parseFloat(document.getElementById('grid-radius').value) || 5;
-  const cellKm = parseInt(document.getElementById('grid-cell').value) || 2;
-  const region = document.getElementById('region').value;
-  const mobileOnly = document.getElementById('mobile-only').checked;
-
-  rememberKeyword(kw);
-  rows = []; seen = new Set();
+  curKw = kw; curRegion = document.getElementById('region').value; curMobile = document.getElementById('mobile-only').checked;
+  rows = []; seen = new Set(); deepAreas = [];
+  fetched = 0; dup = 0; closed = 0; nonmobile = 0; outRange = 0; req = 0;
   document.getElementById('tbody').innerHTML = '';
   document.getElementById('empty-state').classList.add('hidden');
-  resetStats(); updateExportState();
+  document.getElementById('deep-btn').classList.add('hidden');
+  syncStats();
+  rememberKeyword(kw);
 
-  let fetched = 0, dup = 0, closed = 0, nonmobile = 0, outRange = 0, req = 0, totalCells = 0;
   running = true; stopFlag = false;
   document.getElementById('run-btn').classList.add('hidden');
   document.getElementById('stop-btn').classList.remove('hidden');
-  showRunStatus('▸ GRID SWEEP · ' + gridCenters.length + ' AREAS · r=' + radiusKm + 'km');
 
-  const EARTH = 111320;
+  /* ===== PASS 1: plain "kw in area" — the familiar cheap flow (up to 60) ===== */
   outer:
   for (let ai = 0; ai < gridCenters.length; ai++) {
-    if (!running || stopFlag) break outer;
     const a = gridCenters[ai];
-    const radiusM = radiusKm * 1000;
-
-    /* SMART PROBE: whole-area query first — sparse areas skip the grid entirely */
-    showRunStatus('▸ AREA ' + (ai + 1) + '/' + gridCenters.length + ' (' + a.name + ') · PROBE…');
-    const probePayload = { textQuery: kw + ' in ' + a.name, pageSize: 20, languageCode: 'en', regionCode: region,
-      locationBias: { circle: { center: { latitude: a.lat, longitude: a.lng }, radius: radiusM } } };
-    let resp;
-    try {
-      resp = await fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': EMBEDDED_KEY, 'X-Goog-FieldMask': FIELDS }, body: JSON.stringify(probePayload) });
-    } catch (e) { showRunStatus('✖ NETWORK/CORS ERROR: ' + e.message); break outer; }
-    if (resp.status === 403 || resp.status === 404) { showRunStatus('✖ API REJECTED KEY (' + resp.status + ') — PLACES API ENABLED? KEY RESTRICTED?'); break outer; }
-    if (!resp.ok) { showRunStatus('✖ HTTP ' + resp.status); break outer; }
-    req++; addUsage(1);
-    const probeData = await resp.json();
-    let probeGot = 0;
-    for (const p of probeData.places || []) {
-      probeGot++;
-      fetched++;
-      if (p.businessStatus === 'CLOSED_PERMANENTLY') { closed++; continue; }
-      if (seen.has(p.id)) { dup++; continue; }
-      seen.add(p.id);
-      if (mobileOnly && !isMobile(phoneOf(p))) { nonmobile++; continue; }
-      if (p.location && distM(a.lat, a.lng, p.location.latitude, p.location.longitude) > radiusM) { outRange++; continue; }
-      rows.push(p); appendRow(p, rows.length);
-    }
-    if (!probeData.nextPageToken) {
-      showRunStatus('▸ AREA ' + (ai + 1) + '/' + gridCenters.length + ' (' + a.name + ') · SPARSE (' + probeGot + ' RESULTS) — GRID SKIPPED');
-      continue;
-    }
-    /* dense: finish paginating the probe — this IS the center-zone coverage */
-    while (probeData.nextPageToken && running && !stopFlag && currentUsage() < FREE_CAP) {
-      const pagePayload = { textQuery: kw + ' in ' + a.name, pageSize: 20, languageCode: 'en', regionCode: region,
-        locationBias: { circle: { center: { latitude: a.lat, longitude: a.lng }, radius: radiusM } }, pageToken: probeData.nextPageToken };
-      let r3;
-      try {
-        r3 = await fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': EMBEDDED_KEY, 'X-Goog-FieldMask': FIELDS }, body: JSON.stringify(pagePayload) });
-      } catch (e) { showRunStatus('✖ NETWORK/CORS ERROR: ' + e.message); break outer; }
-      if (!r3.ok) { showRunStatus('✖ HTTP ' + r3.status); break outer; }
+    let pageToken = null, pages = 0;
+    showRunStatus('▸ FIND ' + (ai + 1) + '/' + gridCenters.length + ' · ' + a.name + ' · PASS 1');
+    while (pages < 3 && running && !stopFlag && currentUsage() < FREE_CAP) {
+      const payload = { textQuery: curKw + ' in ' + a.name, pageSize: 20, languageCode: 'en', regionCode: curRegion };
+      if (pageToken) payload.pageToken = pageToken;
+      let resp;
+      try { resp = await apiFetch(payload); }
+      catch (e) { showRunStatus('✖ NETWORK/CORS ERROR: ' + e.message); break outer; }
+      if (resp.status === 403 || resp.status === 404) { showRunStatus('✖ API REJECTED KEY (' + resp.status + ') — PLACES API ENABLED? KEY RESTRICTED?'); break outer; }
+      if (!resp.ok) { showRunStatus('✖ HTTP ' + resp.status); break outer; }
       req++; addUsage(1);
-      probeData = await r3.json();
-      let added = 0;
-      for (const p of probeData.places || []) {
-        fetched++;
-        if (p.businessStatus === 'CLOSED_PERMANENTLY') { closed++; continue; }
-        if (seen.has(p.id)) { dup++; continue; }
-        seen.add(p.id);
-        if (mobileOnly && !isMobile(phoneOf(p))) { nonmobile++; continue; }
-        if (p.location && distM(a.lat, a.lng, p.location.latitude, p.location.longitude) > radiusM) { outRange++; continue; }
-        rows.push(p); appendRow(p, rows.length); added++;
+      const data = await resp.json();
+      processPlaces(data.places, null, null, false);
+      pages++;
+      pageToken = data.nextPageToken || null;
+      if (!pageToken) break;
+    }
+    if (pages === 3) deepAreas.push(a); /* hit the 60 wall — more may exist */
+  }
+  syncStats();
+
+  if (!running || stopFlag) { finishSearch('■ STOPPED BY USER'); return; }
+
+  if (deepAreas.length) {
+    /* prompt the user to continue — transparency on usage */
+    let estReq = 0;
+    for (const a of deepAreas) {
+      const { radiusKm, cellKm } = gridParamsFor(a);
+      const radiusM = radiusKm * 1000, step = cellKm * 2000 * 0.9;
+      let cells = 1;
+      for (let dy = -radiusM; dy <= radiusM; dy += step)
+        for (let dx = -radiusM; dx <= radiusM; dx += step)
+          if (!(dx === 0 && dy === 0) && Math.hypot(dx, dy) <= radiusM) cells++;
+      estReq += 3 + Math.max(0, cells - 1) * 3;
+    }
+    document.getElementById('deep-btn').textContent = '▶ CONTINUE DEEP SEARCH · ' + deepAreas.length + ' AREA(S) · ~' + estReq + ' REQ';
+    document.getElementById('deep-btn').classList.remove('hidden');
+    showRunStatus('⚠ ' + deepAreas.length + ' AREA(S) HIT THE 60 CAP — MORE MAY EXIST · CLICK CONTINUE TO SWEEP THEM ALL');
+  } else {
+    finishSearch('✓ COMPLETE — ' + rows.length + ' COMPANIES · ' + gridCenters.length + ' AREAS · ' + req + ' REQ · ALL RESULTS');
+  }
+}
+
+/* ===== PASS 2: deep grid sweep for capped areas (auto radius/cell) ===== */
+async function deepSearch() {
+  if (!deepAreas.length || !running) return;
+  document.getElementById('deep-btn').classList.add('hidden');
+  document.getElementById('stop-btn').classList.remove('hidden');
+  outer:
+  for (let i = 0; i < deepAreas.length; i++) {
+    if (!running || stopFlag) break outer;
+    if (currentUsage() >= FREE_CAP) { showRunStatus('🛑 MONTHLY CAP REACHED (5,000).'); break outer; }
+    const a = deepAreas[i];
+    const { radiusKm, cellKm } = gridParamsFor(a);
+    const radiusM = radiusKm * 1000;
+    showRunStatus('▸ DEEP ' + (i + 1) + '/' + deepAreas.length + ' · ' + a.name + ' · r=' + radiusKm + 'km · c=' + cellKm + 'km');
+
+    /* probe = center zone (paginated when dense) */
+    let probeData;
+    const probePayload = { textQuery: curKw + ' in ' + a.name, pageSize: 20, languageCode: 'en', regionCode: curRegion,
+      locationBias: { circle: { center: { latitude: a.lat, longitude: a.lng }, radius: radiusM } } };
+    try {
+      const r = await apiFetch(probePayload);
+      if (r.status === 403 || r.status === 404) { showRunStatus('✖ API REJECTED KEY (' + r.status + ')'); break outer; }
+      if (!r.ok) { showRunStatus('✖ HTTP ' + r.status); break outer; }
+      req++; addUsage(1);
+      probeData = await r.json();
+    } catch (e) { showRunStatus('✖ NETWORK/CORS ERROR: ' + e.message); break outer; }
+    processPlaces(probeData.places, a, radiusM, true);
+
+    if (probeData.nextPageToken) {
+      while (probeData.nextPageToken && running && !stopFlag && currentUsage() < FREE_CAP) {
+        const pagePayload = { textQuery: curKw + ' in ' + a.name, pageSize: 20, languageCode: 'en', regionCode: curRegion,
+          locationBias: { circle: { center: { latitude: a.lat, longitude: a.lng }, radius: radiusM } }, pageToken: probeData.nextPageToken };
+        let r2;
+        try {
+          r2 = await apiFetch(pagePayload);
+          if (!r2.ok) { showRunStatus('✖ HTTP ' + r2.status); break outer; }
+          req++; addUsage(1);
+          probeData = await r2.json();
+        } catch (e) { showRunStatus('✖ NETWORK/CORS ERROR: ' + e.message); break outer; }
+        const added = processPlaces(probeData.places, a, radiusM, true);
+        if (added === 0) break;
       }
-      if (added === 0) break;
     }
 
-    /* edge cells — center zone already covered by the probe when cellKm <= radiusKm */
-    const latPerM = 1 / EARTH;
-    const lngPerM = 1 / (EARTH * Math.cos(a.lat * Math.PI / 180));
+    /* edge cells (center zone covered by probe when cellKm <= radiusKm) */
+    const latPerM = 1 / 111320;
+    const lngPerM = 1 / (111320 * Math.cos(a.lat * Math.PI / 180));
     const step = cellKm * 2000 * 0.9;
-    const centerCovered = cellKm * 1000 <= radiusM;
     const cells = [];
-    if (!centerCovered) cells.push({ lat: a.lat, lng: a.lng });
+    if (cellKm * 1000 > radiusM) cells.push({ lat: a.lat, lng: a.lng });
     for (let dy = -radiusM; dy <= radiusM; dy += step)
       for (let dx = -radiusM; dx <= radiusM; dx += step)
         if (!(dx === 0 && dy === 0) && Math.hypot(dx, dy) <= radiusM)
           cells.push({ lat: a.lat + dy * latPerM, lng: a.lng + dx * lngPerM });
-    totalCells += cells.length;
 
     for (let ci = 0; ci < cells.length; ci++) {
       if (!running || stopFlag) break outer;
       if (currentUsage() >= FREE_CAP) { showRunStatus('🛑 MONTHLY CAP REACHED (5,000).'); break outer; }
       const c = cells[ci];
       let pageToken = null, pageNo = 0;
-      showRunStatus('▸ AREA ' + (ai + 1) + '/' + gridCenters.length + ' (' + a.name + ') · CELL ' + (ci + 1) + '/' + cells.length + ' · ' + fetched + ' FETCHED · ' + rows.length + ' KEPT');
-
+      showRunStatus('▸ DEEP ' + (i + 1) + '/' + deepAreas.length + ' · ' + a.name + ' · CELL ' + (ci + 1) + '/' + cells.length + ' · ' + fetched + ' FETCHED · ' + rows.length + ' KEPT');
       while (running && !stopFlag && currentUsage() < FREE_CAP) {
         pageNo++;
-        const payload = { textQuery: kw + ' in ' + a.name, pageSize: 20, languageCode: 'en', regionCode: region,
+        const payload = { textQuery: curKw + ' in ' + a.name, pageSize: 20, languageCode: 'en', regionCode: curRegion,
           locationBias: { circle: { center: { latitude: c.lat, longitude: c.lng }, radius: cellKm * 1000 } } };
         if (pageToken) payload.pageToken = pageToken;
-        let r2;
+        let r3;
         try {
-          r2 = await fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': EMBEDDED_KEY, 'X-Goog-FieldMask': FIELDS }, body: JSON.stringify(payload) });
+          r3 = await apiFetch(payload);
+          if (!r3.ok) { showRunStatus('✖ HTTP ' + r3.status); break outer; }
+          req++; addUsage(1);
+          const data = await r3.json();
+          const added = processPlaces(data.places, a, radiusM, true);
+          pageToken = data.nextPageToken || null;
+          if (!pageToken) break;
+          if (pageNo > 1 && added === 0) break;
         } catch (e) { showRunStatus('✖ NETWORK/CORS ERROR: ' + e.message); break outer; }
-        if (r2.status === 403 || r2.status === 404) { showRunStatus('✖ API REJECTED KEY (' + r2.status + ') — PLACES API ENABLED? KEY RESTRICTED?'); break outer; }
-        if (!r2.ok) { showRunStatus('✖ HTTP ' + r2.status); break outer; }
-        req++; addUsage(1);
-        const data = await r2.json();
-        let added = 0;
-        for (const p of data.places || []) {
-          fetched++;
-          if (p.businessStatus === 'CLOSED_PERMANENTLY') { closed++; continue; }
-          if (seen.has(p.id)) { dup++; continue; }
-          seen.add(p.id);
-          if (mobileOnly && !isMobile(phoneOf(p))) { nonmobile++; continue; }
-          if (p.location && distM(a.lat, a.lng, p.location.latitude, p.location.longitude) > radiusM) { outRange++; continue; }
-          rows.push(p); appendRow(p, rows.length); added++;
-        }
-        pageToken = data.nextPageToken || null;
-        if (!pageToken) break;
-        if (pageNo > 1 && added === 0) break;
       }
     }
   }
+  syncStats();
+  finishSearch('✓ COMPLETE — ' + rows.length + ' COMPANIES · ' + gridCenters.length + ' AREAS · ' + req + ' REQ · ' + outRange + ' OUT-OF-RANGE');
+}
 
+function finishSearch(msg) {
   running = false;
   document.getElementById('stop-btn').classList.add('hidden');
   document.getElementById('run-btn').classList.remove('hidden');
-  document.getElementById('st-req').textContent = req;
-  document.getElementById('st-fetched').textContent = fetched;
-  document.getElementById('st-unique').textContent = rows.length;
-  document.getElementById('st-dup').textContent = dup;
-  document.getElementById('st-closed').textContent = closed;
-  document.getElementById('st-nonmobile').textContent = nonmobile;
-  document.getElementById('st-outrange').textContent = outRange;
-  updateExportState();
+  document.getElementById('deep-btn').classList.add('hidden');
+  syncStats();
   refreshLiveUsage();
-  const statusEl = document.getElementById('run-status');
-  if (!statusEl.textContent.includes('✖') && !statusEl.textContent.includes('CAP')) {
-    showRunStatus('✓ COMPLETE — ' + rows.length + ' COMPANIES · ' + gridCenters.length + ' AREAS · ' + totalCells + ' CELLS · ' + req + ' REQ · ' + outRange + ' OUT-OF-RANGE');
-  }
+  if (!msg.includes('✖') && !msg.includes('CAP')) showRunStatus(msg);
   if (rows.length === 0) document.getElementById('empty-state').classList.remove('hidden');
 }
 function stopSearch() { stopFlag = true; running = false; showRunStatus('■ STOPPED BY USER'); }
