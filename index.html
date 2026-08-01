@@ -222,6 +222,7 @@
           <span class="mono text-sm text-slate-500">/ 5,000</span>
         </div>
         <p id="budget-pct" class="mono text-[10px] font-bold text-slate-400 mt-1"></p>
+        <p id="reset-info" class="mono text-[10px] text-slate-600 mt-1"></p>
       </div>
     </div>
     <div class="h-2.5 bg-white/5 rounded-full mt-4 overflow-hidden border border-white/5">
@@ -472,6 +473,10 @@ function updateBudgetUI() {
   document.getElementById('budget-used').textContent = used.toLocaleString();
   document.getElementById('header-budget').textContent = used.toLocaleString() + '/5000';
   document.getElementById('budget-pct').textContent = pct + '% of the month';
+  const now = new Date();
+  const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+  const daysLeft = Math.ceil((next - now) / 86400000);
+  document.getElementById('reset-info').textContent = 'FREE TIER RESETS IN ' + daysLeft + 'D · ' + next.toISOString().slice(0, 10) + ' (UTC · 8AM MYT)';
   const bar = document.getElementById('budget-bar');
   bar.style.width = pct + '%';
   bar.style.background = pct >= 90 ? 'linear-gradient(90deg,#dc2626,#ef4444)' : 'linear-gradient(90deg,#E8751A,#FBBF24)';
