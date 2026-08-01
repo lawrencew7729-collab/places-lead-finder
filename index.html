@@ -66,6 +66,9 @@
     transition: all .15s; cursor: pointer; background: rgba(255,255,255,0.03);
   }
   .chip-dim:hover { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.25); color: #e2e8f0; }
+  .mode-btn { font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 6px 14px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.12); color: #94a3b8; background: rgba(255,255,255,0.03); transition: all .15s; cursor: pointer; }
+  .mode-btn:hover { color: #e2e8f0; }
+  .mode-active { background: rgba(232,117,26,0.15); border-color: #E8751A; color: #E8751A !important; font-weight: 700; }
   .sel-chip {
     display: inline-flex; align-items: center; gap: 5px;
     font-size: 12px; padding: 4px 8px 4px 12px; border-radius: 999px;
@@ -112,6 +115,12 @@
       <span class="text-[#E8751A]">▮</span> Control Deck <span id="qty-hint" class="text-slate-600"></span>
     </div>
 
+    <div class="flex gap-2 mb-4">
+      <button id="mode-batch" onclick="setMode('batch')" class="mode-btn mode-active">KEYWORD × AREA</button>
+      <button id="mode-grid" onclick="setMode('grid')" class="mode-btn">GRID SWEEP</button>
+    </div>
+
+    <div id="panel-batch">
     <div class="grid md:grid-cols-2 gap-4">
       <div>
         <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Keywords <span class="text-slate-600 normal-case tracking-normal">(add multiple)</span></label>
@@ -134,6 +143,38 @@
         </div>
         <div id="area-list" class="flex flex-wrap gap-1.5 mt-2"></div>
         <p class="mono text-[10px] text-slate-600 mt-3 leading-relaxed">KEYWORDS × AREAS AUTO-CROSS · GLOBAL DEDUP · CLOSED REMOVED<br>GOOGLE CAPS ~60 PER QUERY — MORE COMBOS = FULLER COVERAGE</p>
+      </div>
+    </div>
+
+    </div>
+
+    <div id="panel-grid" class="hidden">
+      <div class="grid md:grid-cols-4 gap-4">
+        <div>
+          <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Keyword</label>
+          <input id="grid-kw" placeholder="e.g. flooring company" class="field mt-1.5">
+        </div>
+        <div>
+          <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Center Lat</label>
+          <input id="grid-lat" type="number" step="0.0001" value="3.1390" class="field mt-1.5 mono">
+        </div>
+        <div>
+          <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Center Lng</label>
+          <input id="grid-lng" type="number" step="0.0001" value="101.6869" class="field mt-1.5 mono">
+        </div>
+        <div>
+          <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Radius <span class="text-slate-600">(km)</span></label>
+          <input id="grid-radius" type="number" min="5" max="50" value="15" oninput="updateGridEst()" class="field mt-1.5 mono">
+        </div>
+      </div>
+      <div class="grid md:grid-cols-2 gap-4 mt-4">
+        <div>
+          <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Cell Size <span id="cell-val" class="text-[#E8751A] font-bold">3</span> km</label>
+          <input id="grid-cell" type="range" min="1" max="5" step="1" value="3" oninput="document.getElementById('cell-val').textContent=this.value;updateGridEst()" class="mt-3 w-full">
+        </div>
+        <div class="flex items-end">
+          <p class="mono text-[10px] text-slate-600 pb-2 leading-relaxed">AUTO-GRID · EACH CELL = TOP 60 · GLOBAL DEDUP<br><span id="grid-est" class="text-[#E8751A]">~36 CELLS · ~108 REQ</span></p>
+        </div>
       </div>
     </div>
 
@@ -273,6 +314,22 @@ const onOfficialDomain = location.origin === EXPECTED_ORIGIN;
 if (!onOfficialDomain) {
   document.getElementById('domain-warn').classList.remove('hidden');
   document.getElementById('run-btn').disabled = true;
+}
+
+let mode = 'batch';
+function setMode(m) {
+  mode = m;
+  document.getElementById('mode-batch').className = 'mode-btn' + (m === 'batch' ? ' mode-active' : '');
+  document.getElementById('mode-grid').className = 'mode-btn' + (m === 'grid' ? ' mode-active' : '');
+  document.getElementById('panel-batch').classList.toggle('hidden', m !== 'batch');
+  document.getElementById('panel-grid').classList.toggle('hidden', m !== 'grid');
+}
+function updateGridEst() {
+  const R = parseFloat(document.getElementById('grid-radius').value) || 15;
+  const c = parseInt(document.getElementById('grid-cell').value) || 3;
+  const box = R * 2000, step = c * 2000 * 0.9;
+  const n = Math.max(1, Math.ceil(box / step));
+  document.getElementById('grid-est').textContent = '~' + (n * n) + ' CELLS · ~' + (n * n * 3) + ' REQ';
 }
 
 /* ================= selected chips (keywords / areas) ================= */
@@ -434,6 +491,7 @@ function showRunStatus(t) { document.getElementById('run-status').textContent = 
 async function runSearch() {
   if (!onOfficialDomain) { showRunStatus('✖ SEARCH DISABLED — OPEN THE OFFICIAL URL'); return; }
   if (currentUsage() >= FREE_CAP) { showRunStatus('🛑 MONTHLY CAP REACHED (5,000).'); return; }
+  if (mode === 'grid') { await runGridSweep(); return; }
 
   const kws = [...selectedKeywords];
   const kwInput = document.getElementById('keyword').value.trim();
@@ -531,6 +589,89 @@ async function runSearch() {
   }
   if (rows.length === 0) document.getElementById('empty-state').classList.remove('hidden');
 }
+async function runGridSweep() {
+  const kw = document.getElementById('grid-kw').value.trim();
+  if (!kw) { alert('Enter a keyword for the grid sweep.'); return; }
+  const clat = parseFloat(document.getElementById('grid-lat').value);
+  const clng = parseFloat(document.getElementById('grid-lng').value);
+  const radiusKm = parseFloat(document.getElementById('grid-radius').value) || 15;
+  const cellKm = parseInt(document.getElementById('grid-cell').value) || 3;
+  if (isNaN(clat) || isNaN(clng)) { alert('Enter valid center lat/lng.'); return; }
+  const maxResults = parseInt(document.getElementById('max').value) || 60;
+  const region = document.getElementById('region').value;
+  const mobileOnly = document.getElementById('mobile-only').checked;
+
+  const EARTH = 111320;
+  const latPerM = 1 / EARTH;
+  const lngPerM = 1 / (EARTH * Math.cos(clat * Math.PI / 180));
+  const radiusM = radiusKm * 1000;
+  const step = cellKm * 2000 * 0.9;
+  const cells = [];
+  for (let dy = -radiusM; dy <= radiusM; dy += step)
+    for (let dx = -radiusM; dx <= radiusM; dx += step)
+      cells.push({ lat: clat + dy * latPerM, lng: clng + dx * lngPerM });
+
+  rows = []; seen = new Set();
+  document.getElementById('tbody').innerHTML = '';
+  document.getElementById('empty-state').classList.add('hidden');
+  resetStats(); updateExportState();
+
+  let fetched = 0, dup = 0, closed = 0, nonmobile = 0, req = 0;
+  running = true; stopFlag = false;
+  document.getElementById('run-btn').classList.add('hidden');
+  document.getElementById('stop-btn').classList.remove('hidden');
+  showRunStatus('▸ GRID SWEEP · ' + cells.length + ' CELLS · r=' + cellKm + 'km');
+
+  outer:
+  for (let ci = 0; ci < cells.length; ci++) {
+    if (!running || stopFlag) break outer;
+    if (currentUsage() >= FREE_CAP) { showRunStatus('🛑 MONTHLY CAP REACHED (5,000).'); break outer; }
+    const c = cells[ci];
+    let pageToken = null;
+    showRunStatus('▸ CELL ' + (ci + 1) + '/' + cells.length + ' · ' + c.lat.toFixed(4) + ',' + c.lng.toFixed(4) + ' · ' + fetched + ' FETCHED · ' + rows.length + ' KEPT');
+    while (running && !stopFlag && currentUsage() < FREE_CAP) {
+      const payload = { textQuery: kw, pageSize: 20, languageCode: 'en', regionCode: region,
+        locationBias: { circle: { center: { latitude: c.lat, longitude: c.lng }, radius: cellKm * 1000 } } };
+      if (pageToken) payload.pageToken = pageToken;
+      let resp;
+      try {
+        resp = await fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': EMBEDDED_KEY, 'X-Goog-FieldMask': FIELDS }, body: JSON.stringify(payload) });
+      } catch (e) { showRunStatus('✖ NETWORK/CORS ERROR: ' + e.message); break outer; }
+      if (resp.status === 403 || resp.status === 404) { showRunStatus('✖ API REJECTED KEY (' + resp.status + ')'); break outer; }
+      if (!resp.ok) { showRunStatus('✖ HTTP ' + resp.status); break outer; }
+      req++; addUsage(1);
+      const data = await resp.json();
+      for (const p of data.places || []) {
+        fetched++;
+        if (p.businessStatus === 'CLOSED_PERMANENTLY') { closed++; continue; }
+        if (seen.has(p.id)) { dup++; continue; }
+        seen.add(p.id);
+        if (mobileOnly && !isMobile(phoneOf(p))) { nonmobile++; continue; }
+        rows.push(p); appendRow(p, rows.length);
+      }
+      pageToken = data.nextPageToken || null;
+      if (!pageToken) break;
+    }
+  }
+
+  running = false;
+  document.getElementById('stop-btn').classList.add('hidden');
+  document.getElementById('run-btn').classList.remove('hidden');
+  document.getElementById('st-req').textContent = req;
+  document.getElementById('st-fetched').textContent = fetched;
+  document.getElementById('st-unique').textContent = rows.length;
+  document.getElementById('st-dup').textContent = dup;
+  document.getElementById('st-closed').textContent = closed;
+  document.getElementById('st-nonmobile').textContent = nonmobile;
+  updateExportState();
+  refreshLiveUsage();
+  const statusEl = document.getElementById('run-status');
+  if (!statusEl.textContent.includes('✖') && !statusEl.textContent.includes('CAP')) {
+    showRunStatus('✓ GRID COMPLETE — ' + rows.length + ' COMPANIES · ' + cells.length + ' CELLS · ' + req + ' REQ');
+  }
+  if (rows.length === 0) document.getElementById('empty-state').classList.remove('hidden');
+}
+
 function stopSearch() { stopFlag = true; running = false; showRunStatus('■ STOPPED BY USER'); }
 
 function resetStats() {
