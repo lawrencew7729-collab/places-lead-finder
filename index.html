@@ -95,7 +95,7 @@
 
 <!-- ===== Domain warning ===== -->
 <div id="domain-warn" class="hidden bg-red-950/60 border-b border-red-500/30 text-red-300 text-center py-2 px-4 mono text-[11px] tracking-widest">
-  ⚠ OUTSIDE OFFICIAL DOMAIN — SEARCH DISABLED · OPEN https://places-lead-finder-site.vercel.app
+  ⚠ OUTSIDE OFFICIAL DOMAIN — SEARCH DISABLED · OPEN https://leadfinder.business
 </div>
 
 <!-- ===== Header ===== -->
@@ -280,7 +280,7 @@
 /* ================= config ================= */
 const API_URL = 'https://places.googleapis.com/v1/places:searchText';
 const EMBEDDED_KEY = 'AIzaSyBR_uiUSfGZtbk7Nu89sWm7ESTPfMWedFg';
-const EXPECTED_ORIGIN = 'https://places-lead-finder-site.vercel.app';
+const EXPECTED_ORIGINS = ['https://places-lead-finder-site.vercel.app', 'https://leadfinder.business'];
 const FREE_CAP = 5000;
 const FIELDS = 'places.id,places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.internationalPhoneNumber,places.websiteUri,places.businessStatus,places.location,nextPageToken';
 
@@ -327,7 +327,7 @@ if (sessionStorage.getItem('plf_auth') !== '1') {
 }
 
 /* ================= domain check ================= */
-const onOfficialDomain = location.origin === EXPECTED_ORIGIN;
+const onOfficialDomain = EXPECTED_ORIGINS.includes(location.origin);
 if (!onOfficialDomain) {
   document.getElementById('domain-warn').classList.remove('hidden');
   document.getElementById('run-btn').disabled = true;
@@ -343,7 +343,13 @@ function renderChips(list, dim) {
   document.getElementById('kw-chips').innerHTML = list.map(k =>
     `<button onclick="useKeyword('${k.replace(/'/g, "\\'")}')" class="${dim ? 'chip-dim' : 'chip'}">${esc(k)}</button>`).join('');
 }
-function useKeyword(k) { document.getElementById('grid-kw').value = k; }
+function useKeyword(k) {
+  const input = document.getElementById('grid-kw');
+  const parts = input.value.split(',').map(s => s.trim()).filter(Boolean);
+  if (!parts.includes(k)) parts.push(k);
+  input.value = parts.join(', ');
+  input.focus();
+}
 function debounceSuggest() {
   const kw = document.getElementById('grid-kw').value.trim();
   clearTimeout(sugTimer);
