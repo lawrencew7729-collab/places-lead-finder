@@ -70,6 +70,29 @@
 </head>
 <body class="min-h-screen text-slate-200 antialiased">
 
+<!-- ===== Login gate ===== -->
+<div id="login-overlay" class="fixed inset-0 z-50 flex items-center justify-center px-4" style="background:rgba(4,7,15,0.92); backdrop-filter:blur(8px);">
+  <div class="glass rounded-2xl p-8 w-full max-w-sm">
+    <div class="flex items-center gap-3 mb-6">
+      <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-[#E8751A] to-[#F59E0B] glow-orange flex items-center justify-center">
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+      </div>
+      <div>
+        <h2 class="mono font-bold text-white tracking-widest">PLACES<span class="text-[#E8751A]">//</span>LEAD FINDER</h2>
+        <p class="mono text-[9px] text-slate-500 tracking-widest uppercase">Authorized Access Only</p>
+      </div>
+    </div>
+    <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Username</label>
+    <input id="login-user" class="field mt-1.5" autocomplete="username" placeholder="username">
+    <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest mt-3 block">Password</label>
+    <input id="login-pass" type="password" class="field mt-1.5" autocomplete="current-password" placeholder="••••••••" onkeydown="if(event.key==='Enter'){event.preventDefault();doLogin();}">
+    <p id="login-err" class="mono text-[10px] text-red-400 mt-2 hidden">✖ INVALID CREDENTIALS</p>
+    <button onclick="doLogin()" class="w-full mt-4 bg-gradient-to-r from-[#E8751A] to-[#F59E0B] hover:brightness-110 text-white mono font-bold text-sm py-3 rounded-xl glow-orange transition-all">
+      UNLOCK ▶
+    </button>
+  </div>
+</div>
+
 <!-- ===== Domain warning ===== -->
 <div id="domain-warn" class="hidden bg-red-950/60 border-b border-red-500/30 text-red-300 text-center py-2 px-4 mono text-[11px] tracking-widest">
   ⚠ OUTSIDE OFFICIAL DOMAIN — SEARCH DISABLED · OPEN https://places-lead-finder-site.vercel.app
@@ -283,6 +306,26 @@ let deepAreas = [];   /* areas that hit the 60 cap — need the deep sweep */
 let advanced = false;
 let curKw = '', curRegion = 'my', curMobile = false;
 let fetched = 0, dup = 0, closed = 0, nonmobile = 0, outRange = 0, req = 0;
+
+/* ================= access gate (client-side — deters casual use, NOT real security) ================= */
+const APP_USER = 'admin';
+const APP_PASS = 'leadfinder2026'; /* change this to your own password */
+function doLogin() {
+  const u = document.getElementById('login-user').value.trim();
+  const p = document.getElementById('login-pass').value;
+  if (u === APP_USER && p === APP_PASS) {
+    sessionStorage.setItem('plf_auth', '1');
+    document.getElementById('login-overlay').classList.add('hidden');
+    document.getElementById('login-err').classList.add('hidden');
+  } else {
+    document.getElementById('login-err').classList.remove('hidden');
+  }
+}
+if (sessionStorage.getItem('plf_auth') !== '1') {
+  document.getElementById('login-overlay').classList.remove('hidden');
+} else {
+  document.getElementById('login-overlay').classList.add('hidden');
+}
 
 /* ================= domain check ================= */
 const onOfficialDomain = location.origin === EXPECTED_ORIGIN;
