@@ -136,7 +136,7 @@
         <p class="mono text-[9px] text-slate-600 mt-1">SMALLER CELL = MORE COVERAGE (MORE REQUESTS)</p>
       </div>
       <div class="flex items-end">
-        <p class="mono text-[10px] text-slate-600 pb-2 leading-relaxed">AUTO-GRID · EACH CELL = TOP 60 · GLOBAL DEDUP · SPARSE AREA = 1 REQ ONLY<br><span id="grid-est" class="text-[#E8751A]">~9 CELLS · ~27 REQ</span></p>
+        <p class="mono text-[10px] text-slate-600 pb-2 leading-relaxed">AUTO-GRID · EACH CELL = TOP 60 · GLOBAL DEDUP · SPARSE AREA = 1 REQ ONLY<br><span id="grid-est" class="text-[#E8751A]">~5 CELLS · ≤16 REQ</span></p>
       </div>
     </div>
 
@@ -208,6 +208,7 @@
         <span class="px-2.5 py-1 rounded-md bg-white/5 border border-white/10 text-slate-400">DUP <span id="st-dup">0</span></span>
         <span class="px-2.5 py-1 rounded-md bg-white/5 border border-white/10 text-slate-400">CLOSED <span id="st-closed">0</span></span>
         <span class="px-2.5 py-1 rounded-md bg-white/5 border border-white/10 text-slate-400">NON-MOB <span id="st-nonmobile">0</span></span>
+        <span class="px-2.5 py-1 rounded-md bg-white/5 border border-white/10 text-slate-400">OUT <span id="st-outrange">0</span></span>
         <span class="px-2.5 py-1 rounded-md bg-white/5 border border-white/10 text-slate-400">REQ <span id="st-req">0</span></span>
       </div>
       <div class="flex items-center gap-2">
@@ -251,7 +252,7 @@ const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemi
 const EMBEDDED_KEY = 'AIzaSyBR_uiUSfGZtbk7Nu89sWm7ESTPfMWedFg';
 const EXPECTED_ORIGIN = 'https://places-lead-finder-site.vercel.app';
 const FREE_CAP = 5000;
-const FIELDS = 'places.id,places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.internationalPhoneNumber,places.websiteUri,places.businessStatus,nextPageToken';
+const FIELDS = 'places.id,places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.internationalPhoneNumber,places.websiteUri,places.businessStatus,places.location,nextPageToken';
 
 const SUGGESTION_DICT = {
   'restaurant': ['cafe', 'kopitiam', 'kedai makan', 'mamak restaurant', 'seafood restaurant', 'dim sum', 'noodle house', 'bistro'],
@@ -365,10 +366,13 @@ async function locateArea() {
 function updateGridEst() {
   const R = parseFloat(document.getElementById('grid-radius').value) || 5;
   const c = parseInt(document.getElementById('grid-cell').value) || 2;
-  const box = R * 2000, step = c * 2000 * 0.9;
-  const n = Math.max(1, Math.ceil(box / step));
+  const radiusM = R * 1000, step = c * 2000 * 0.9;
+  let cells = 1;
+  for (let dy = -radiusM; dy <= radiusM; dy += step)
+    for (let dx = -radiusM; dx <= radiusM; dx += step)
+      if (!(dx === 0 && dy === 0) && Math.hypot(dx, dy) <= radiusM) cells++;
   const areas = gridCenters.length || (document.getElementById('grid-area').value.split(',').filter(s => s.trim()).length) || 1;
-  document.getElementById('grid-est').textContent = '~' + (n * n * areas) + ' CELLS · ~' + (n * n * areas * 3) + ' REQ';
+  document.getElementById('grid-est').textContent = '~' + (cells * areas) + ' CELLS · ≤' + (cells * areas * 3 + areas) + ' REQ';
 }
 
 /* ================= budget UI ================= */
@@ -424,6 +428,14 @@ function isMobile(ph) {
   return d.startsWith('01');
 }
 
+/* ================= geo helpers ================= */
+function distM(lat1, lng1, lat2, lng2) {
+  const R = 6371000, toRad = Math.PI / 180;
+  const dLat = (lat2 - lat1) * toRad, dLng = (lng2 - lng1) * toRad;
+  const s = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+
 /* ================= search ================= */
 function showRunStatus(t) { document.getElementById('run-status').textContent = t; }
 
@@ -452,7 +464,7 @@ async function runSearch() {
   document.getElementById('empty-state').classList.add('hidden');
   resetStats(); updateExportState();
 
-  let fetched = 0, dup = 0, closed = 0, nonmobile = 0, req = 0, totalCells = 0;
+  let fetched = 0, dup = 0, closed = 0, nonmobile = 0, outRange = 0, req = 0, totalCells = 0;
   running = true; stopFlag = false;
   document.getElementById('run-btn').classList.add('hidden');
   document.getElementById('stop-btn').classList.remove('hidden');
@@ -467,7 +479,7 @@ async function runSearch() {
 
     /* SMART PROBE: whole-area query first — sparse areas skip the grid entirely */
     showRunStatus('▸ AREA ' + (ai + 1) + '/' + gridCenters.length + ' (' + a.name + ') · PROBE…');
-    const probePayload = { textQuery: kw, pageSize: 20, languageCode: 'en', regionCode: region,
+    const probePayload = { textQuery: kw + ' in ' + a.name, pageSize: 20, languageCode: 'en', regionCode: region,
       locationBias: { circle: { center: { latitude: a.lat, longitude: a.lng }, radius: radiusM } } };
     let resp;
     try {
@@ -485,6 +497,7 @@ async function runSearch() {
       if (seen.has(p.id)) { dup++; continue; }
       seen.add(p.id);
       if (mobileOnly && !isMobile(phoneOf(p))) { nonmobile++; continue; }
+      if (p.location && distM(a.lat, a.lng, p.location.latitude, p.location.longitude) > radiusM) { outRange++; continue; }
       rows.push(p); appendRow(p, rows.length);
     }
     if (!probeData.nextPageToken) {
@@ -492,14 +505,15 @@ async function runSearch() {
       continue;
     }
 
-    /* dense — full grid sweep */
+    /* dense — full grid sweep (circle-partitioned, center cell included) */
     const latPerM = 1 / EARTH;
     const lngPerM = 1 / (EARTH * Math.cos(a.lat * Math.PI / 180));
     const step = cellKm * 2000 * 0.9;
-    const cells = [];
+    const cells = [{ lat: a.lat, lng: a.lng }];
     for (let dy = -radiusM; dy <= radiusM; dy += step)
       for (let dx = -radiusM; dx <= radiusM; dx += step)
-        cells.push({ lat: a.lat + dy * latPerM, lng: a.lng + dx * lngPerM });
+        if (!(dx === 0 && dy === 0) && Math.hypot(dx, dy) <= radiusM)
+          cells.push({ lat: a.lat + dy * latPerM, lng: a.lng + dx * lngPerM });
     totalCells += cells.length;
 
     for (let ci = 0; ci < cells.length; ci++) {
@@ -510,7 +524,7 @@ async function runSearch() {
       showRunStatus('▸ AREA ' + (ai + 1) + '/' + gridCenters.length + ' (' + a.name + ') · CELL ' + (ci + 1) + '/' + cells.length + ' · ' + fetched + ' FETCHED · ' + rows.length + ' KEPT');
 
       while (running && !stopFlag && currentUsage() < FREE_CAP) {
-        const payload = { textQuery: kw, pageSize: 20, languageCode: 'en', regionCode: region,
+        const payload = { textQuery: kw + ' in ' + a.name, pageSize: 20, languageCode: 'en', regionCode: region,
           locationBias: { circle: { center: { latitude: c.lat, longitude: c.lng }, radius: cellKm * 1000 } } };
         if (pageToken) payload.pageToken = pageToken;
         let r2;
@@ -527,6 +541,7 @@ async function runSearch() {
           if (seen.has(p.id)) { dup++; continue; }
           seen.add(p.id);
           if (mobileOnly && !isMobile(phoneOf(p))) { nonmobile++; continue; }
+          if (p.location && distM(a.lat, a.lng, p.location.latitude, p.location.longitude) > radiusM) { outRange++; continue; }
           rows.push(p); appendRow(p, rows.length);
         }
         pageToken = data.nextPageToken || null;
@@ -544,18 +559,19 @@ async function runSearch() {
   document.getElementById('st-dup').textContent = dup;
   document.getElementById('st-closed').textContent = closed;
   document.getElementById('st-nonmobile').textContent = nonmobile;
+  document.getElementById('st-outrange').textContent = outRange;
   updateExportState();
   refreshLiveUsage();
   const statusEl = document.getElementById('run-status');
   if (!statusEl.textContent.includes('✖') && !statusEl.textContent.includes('CAP')) {
-    showRunStatus('✓ COMPLETE — ' + rows.length + ' COMPANIES · ' + gridCenters.length + ' AREAS · ' + totalCells + ' CELLS · ' + req + ' REQ');
+    showRunStatus('✓ COMPLETE — ' + rows.length + ' COMPANIES · ' + gridCenters.length + ' AREAS · ' + totalCells + ' CELLS · ' + req + ' REQ · ' + outRange + ' OUT-OF-RANGE');
   }
   if (rows.length === 0) document.getElementById('empty-state').classList.remove('hidden');
 }
 function stopSearch() { stopFlag = true; running = false; showRunStatus('■ STOPPED BY USER'); }
 
 function resetStats() {
-  ['st-fetched','st-unique','st-dup','st-closed','st-nonmobile','st-req'].forEach(id =>
+  ['st-fetched','st-unique','st-dup','st-closed','st-nonmobile','st-outrange','st-req'].forEach(id =>
     document.getElementById(id).textContent = '0');
 }
 
