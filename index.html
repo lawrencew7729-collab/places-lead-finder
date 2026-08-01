@@ -136,7 +136,7 @@
         <p class="mono text-[9px] text-slate-600 mt-1">SMALLER CELL = MORE COVERAGE (MORE REQUESTS)</p>
       </div>
       <div class="flex items-end">
-        <p class="mono text-[10px] text-slate-600 pb-2 leading-relaxed">AUTO-GRID FROM AREA CENTER · EACH CELL = TOP 60 · GLOBAL DEDUP<br><span id="grid-est" class="text-[#E8751A]">~9 CELLS · ~27 REQ</span></p>
+        <p class="mono text-[10px] text-slate-600 pb-2 leading-relaxed">AUTO-GRID · EACH CELL = TOP 60 · GLOBAL DEDUP · SPARSE AREA = 1 REQ ONLY<br><span id="grid-est" class="text-[#E8751A]">~9 CELLS · ~27 REQ</span></p>
       </div>
     </div>
 
@@ -463,9 +463,38 @@ async function runSearch() {
   for (let ai = 0; ai < gridCenters.length; ai++) {
     if (!running || stopFlag) break outer;
     const a = gridCenters[ai];
+    const radiusM = radiusKm * 1000;
+
+    /* SMART PROBE: whole-area query first — sparse areas skip the grid entirely */
+    showRunStatus('▸ AREA ' + (ai + 1) + '/' + gridCenters.length + ' (' + a.name + ') · PROBE…');
+    const probePayload = { textQuery: kw, pageSize: 20, languageCode: 'en', regionCode: region,
+      locationBias: { circle: { center: { latitude: a.lat, longitude: a.lng }, radius: radiusM } } };
+    let resp;
+    try {
+      resp = await fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': EMBEDDED_KEY, 'X-Goog-FieldMask': FIELDS }, body: JSON.stringify(probePayload) });
+    } catch (e) { showRunStatus('✖ NETWORK/CORS ERROR: ' + e.message); break outer; }
+    if (resp.status === 403 || resp.status === 404) { showRunStatus('✖ API REJECTED KEY (' + resp.status + ') — PLACES API ENABLED? KEY RESTRICTED?'); break outer; }
+    if (!resp.ok) { showRunStatus('✖ HTTP ' + resp.status); break outer; }
+    req++; addUsage(1);
+    const probeData = await resp.json();
+    let probeGot = 0;
+    for (const p of probeData.places || []) {
+      probeGot++;
+      fetched++;
+      if (p.businessStatus === 'CLOSED_PERMANENTLY') { closed++; continue; }
+      if (seen.has(p.id)) { dup++; continue; }
+      seen.add(p.id);
+      if (mobileOnly && !isMobile(phoneOf(p))) { nonmobile++; continue; }
+      rows.push(p); appendRow(p, rows.length);
+    }
+    if (!probeData.nextPageToken) {
+      showRunStatus('▸ AREA ' + (ai + 1) + '/' + gridCenters.length + ' (' + a.name + ') · SPARSE (' + probeGot + ' RESULTS) — GRID SKIPPED');
+      continue;
+    }
+
+    /* dense — full grid sweep */
     const latPerM = 1 / EARTH;
     const lngPerM = 1 / (EARTH * Math.cos(a.lat * Math.PI / 180));
-    const radiusM = radiusKm * 1000;
     const step = cellKm * 2000 * 0.9;
     const cells = [];
     for (let dy = -radiusM; dy <= radiusM; dy += step)
@@ -484,14 +513,14 @@ async function runSearch() {
         const payload = { textQuery: kw, pageSize: 20, languageCode: 'en', regionCode: region,
           locationBias: { circle: { center: { latitude: c.lat, longitude: c.lng }, radius: cellKm * 1000 } } };
         if (pageToken) payload.pageToken = pageToken;
-        let resp;
+        let r2;
         try {
-          resp = await fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': EMBEDDED_KEY, 'X-Goog-FieldMask': FIELDS }, body: JSON.stringify(payload) });
+          r2 = await fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': EMBEDDED_KEY, 'X-Goog-FieldMask': FIELDS }, body: JSON.stringify(payload) });
         } catch (e) { showRunStatus('✖ NETWORK/CORS ERROR: ' + e.message); break outer; }
-        if (resp.status === 403 || resp.status === 404) { showRunStatus('✖ API REJECTED KEY (' + resp.status + ') — PLACES API ENABLED? KEY RESTRICTED?'); break outer; }
-        if (!resp.ok) { showRunStatus('✖ HTTP ' + resp.status); break outer; }
+        if (r2.status === 403 || r2.status === 404) { showRunStatus('✖ API REJECTED KEY (' + r2.status + ') — PLACES API ENABLED? KEY RESTRICTED?'); break outer; }
+        if (!r2.ok) { showRunStatus('✖ HTTP ' + r2.status); break outer; }
         req++; addUsage(1);
-        const data = await resp.json();
+        const data = await r2.json();
         for (const p of data.places || []) {
           fetched++;
           if (p.businessStatus === 'CLOSED_PERMANENTLY') { closed++; continue; }
