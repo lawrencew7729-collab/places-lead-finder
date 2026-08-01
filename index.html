@@ -132,12 +132,12 @@
     <div id="adv-panel" class="hidden grid md:grid-cols-2 gap-4 mt-4">
       <div>
         <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Radius <span class="text-slate-600">(km)</span></label>
-        <input id="grid-radius" type="number" min="1" max="50" value="5" oninput="updateGridEst()" class="field mt-1.5 mono">
+        <input id="grid-radius" type="number" min="1" max="50" value="5" class="field mt-1.5 mono">
       </div>
       <div>
-        <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Cell Size <span id="cell-val" class="text-[#E8751A] font-bold">2</span> km</label>
-        <input id="grid-cell" type="range" min="1" max="5" step="1" value="2" oninput="document.getElementById('cell-val').textContent=this.value;updateGridEst()" class="mt-3 w-full">
-        <p class="mono text-[9px] text-slate-600 mt-1">AUTO (DEFAULT): CELL SIZED FROM THE AREA — NO TUNING NEEDED</p>
+        <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Cell Size <span id="cell-val" class="text-[#E8751A] font-bold">3</span> km</label>
+        <input id="grid-cell" type="range" min="1" max="5" step="1" value="3" oninput="document.getElementById('cell-val').textContent=this.value" class="mt-3 w-full">
+        <p class="mono text-[9px] text-slate-600 mt-1">AUTO (DEFAULT): CELL PRESET 3KM — NO TUNING NEEDED</p>
       </div>
     </div>
 
@@ -381,12 +381,12 @@ function toggleAdv() {
   document.getElementById('adv-panel').classList.toggle('hidden', !advanced);
 }
 function autoGridFromBBox(bbox, clat) {
-  if (!bbox || bbox.length < 4) return { radiusKm: 5, cellKm: 2 };
+  if (!bbox || bbox.length < 4) return { radiusKm: 5, cellKm: 3 };
   const latSpan = Math.abs(bbox[1] - bbox[0]) * 111;
   const lngSpan = Math.abs(bbox[3] - bbox[2]) * 111 * Math.cos(clat * Math.PI / 180);
   const size = Math.max(latSpan, lngSpan);
   const radiusKm = Math.min(10, Math.max(2, Math.round(size * 0.75)));
-  const cellKm = Math.min(3, Math.max(1, Math.round(radiusKm / 2.5)));
+  const cellKm = 3; /* preset cell size 3km (temporary) */
   return { radiusKm, cellKm };
 }
 function gridParamsFor(a) {
