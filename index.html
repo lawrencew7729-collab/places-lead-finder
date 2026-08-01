@@ -66,9 +66,21 @@
     transition: all .15s; cursor: pointer; background: rgba(255,255,255,0.03);
   }
   .chip-dim:hover { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.25); color: #e2e8f0; }
+  .sel-chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 12px; padding: 4px 8px 4px 12px; border-radius: 999px;
+    background: rgba(232,117,26,0.12); border: 1px solid rgba(232,117,26,0.45); color: #fda76a;
+  }
+  .sel-chip button { color: #fda76a; opacity: .7; font-size: 13px; line-height: 1; cursor: pointer; }
+  .sel-chip button:hover { opacity: 1; }
 </style>
 </head>
 <body class="min-h-screen text-slate-200 antialiased">
+
+<!-- ===== Domain warning ===== -->
+<div id="domain-warn" class="hidden bg-red-950/60 border-b border-red-500/30 text-red-300 text-center py-2 px-4 mono text-[11px] tracking-widest">
+  ⚠ OUTSIDE OFFICIAL DOMAIN — SEARCH DISABLED · OPEN https://places-lead-finder-site.vercel.app
+</div>
 
 <!-- ===== Header ===== -->
 <header class="sticky top-0 z-30 glass-strong border-b border-white/5">
@@ -97,30 +109,38 @@
   <!-- ===== Card 1: Control Deck ===== -->
   <section class="glass rounded-2xl p-5 md:p-6">
     <div class="mono text-[10px] tracking-[0.25em] text-slate-500 uppercase mb-4 flex items-center gap-2">
-      <span class="text-[#E8751A]">▮</span> Control Deck
+      <span class="text-[#E8751A]">▮</span> Control Deck <span id="qty-hint" class="text-slate-600"></span>
     </div>
 
     <div class="grid md:grid-cols-2 gap-4">
       <div>
-        <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Keyword</label>
-        <input id="keyword" placeholder="type e.g. restaurant…" autocomplete="off" class="field mt-1.5">
-        <div class="flex items-center gap-2 mt-2.5">
+        <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Keywords <span class="text-slate-600 normal-case tracking-normal">(add multiple)</span></label>
+        <div class="flex gap-2 mt-1.5">
+          <input id="keyword" placeholder="type e.g. restaurant…" autocomplete="off" class="field">
+          <button onclick="addKeywordFromInput()" class="shrink-0 mono text-[11px] bg-white/5 hover:bg-white/10 border border-white/15 text-white font-semibold px-4 rounded-lg transition-colors">+ ADD</button>
+        </div>
+        <div id="kw-list" class="flex flex-wrap gap-1.5 mt-2"></div>
+        <div class="flex items-center gap-2 mt-2">
           <span id="sug-label" class="mono text-[9px] text-slate-600 uppercase tracking-widest">—</span>
           <span id="sug-spinner" class="hidden w-3 h-3 border-2 border-[#E8751A] border-t-transparent rounded-full animate-spin"></span>
         </div>
         <div id="kw-chips" class="flex flex-wrap gap-1.5 mt-1.5"></div>
       </div>
       <div>
-        <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Area</label>
-        <input id="area" placeholder="e.g. Kuala Lumpur" autocomplete="off" class="field mt-1.5">
+        <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Areas <span class="text-slate-600 normal-case tracking-normal">(add multiple)</span></label>
+        <div class="flex gap-2 mt-1.5">
+          <input id="area" placeholder="e.g. Kuala Lumpur" autocomplete="off" class="field">
+          <button onclick="addAreaFromInput()" class="shrink-0 mono text-[11px] bg-white/5 hover:bg-white/10 border border-white/15 text-white font-semibold px-4 rounded-lg transition-colors">+ ADD</button>
+        </div>
+        <div id="area-list" class="flex flex-wrap gap-1.5 mt-2"></div>
+        <p class="mono text-[10px] text-slate-600 mt-3 leading-relaxed">KEYWORDS × AREAS AUTO-CROSS · GLOBAL DEDUP · CLOSED REMOVED<br>GOOGLE CAPS ~60 PER QUERY — MORE COMBOS = FULLER COVERAGE</p>
       </div>
     </div>
 
     <div class="grid md:grid-cols-3 gap-4 mt-4">
       <div>
-        <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Max Results <span id="max-val" class="text-[#E8751A] font-bold">60</span></label>
+        <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Max per query <span id="max-val" class="text-[#E8751A] font-bold">60</span></label>
         <input id="max" type="range" min="20" max="60" step="20" value="60" oninput="document.getElementById('max-val').textContent=this.value" class="mt-3 w-full">
-        <p class="mono text-[9px] text-slate-600 mt-1">GOOGLE CAPS ~60 PER QUERY</p>
       </div>
       <div>
         <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Region</label>
@@ -211,7 +231,7 @@
       <div id="empty-state" class="py-20 text-center">
         <svg class="mx-auto w-10 h-10 mb-4 text-slate-700" fill="none" stroke="currentColor" stroke-width="1.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg>
         <p class="mono text-sm text-slate-500 tracking-widest">AWAITING INPUT</p>
-        <p class="mono text-[11px] text-slate-600 mt-2">SET KEYWORD + AREA → RUN SEARCH → LIVE STREAM · DEDUP · CLOSED REMOVED</p>
+        <p class="mono text-[11px] text-slate-600 mt-2">SET KEYWORDS + AREAS → RUN SEARCH → LIVE STREAM · GLOBAL DEDUP · CLOSED REMOVED</p>
       </div>
     </div>
   </section>
@@ -225,13 +245,11 @@
 /* ================= config ================= */
 const API_URL = 'https://places.googleapis.com/v1/places:searchText';
 const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
-/* Embedded API key — per-deployment. For customer deployments, replace with the customer's key
-   and restrict it in Google Console to that customer's subdomain (HTTP referrer). */
 const EMBEDDED_KEY = 'AIzaSyBR_uiUSfGZtbk7Nu89sWm7ESTPfMWedFg';
+const EXPECTED_ORIGIN = 'https://places-lead-finder-site.vercel.app';
 const FREE_CAP = 5000;
 const FIELDS = 'places.id,places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.internationalPhoneNumber,places.websiteUri,places.businessStatus,nextPageToken';
 
-/* Local fallback suggestions (used when Gemini API is not enabled) */
 const SUGGESTION_DICT = {
   'restaurant': ['cafe', 'kopitiam', 'kedai makan', 'mamak restaurant', 'seafood restaurant', 'dim sum', 'noodle house', 'bistro'],
   'cafe': ['coffee shop', 'kopitiam', 'bakery', 'dessert cafe', 'bubble tea', 'brunch place', 'roastery', 'teahouse'],
@@ -247,10 +265,58 @@ const SUGGESTION_DICT = {
 const SUFFIX_FALLBACK = ['supplier', 'shop', 'service', 'company', 'store', 'wholesale', 'contractor', 'dealer'];
 
 let rows = [], seen = new Set(), running = false, stopFlag = false, sugTimer = null;
+let selectedKeywords = [], selectedAreas = [];
+
+/* ================= domain check ================= */
+const onOfficialDomain = location.origin === EXPECTED_ORIGIN;
+if (!onOfficialDomain) {
+  document.getElementById('domain-warn').classList.remove('hidden');
+  document.getElementById('run-btn').disabled = true;
+}
+
+/* ================= selected chips (keywords / areas) ================= */
+function renderKwList() {
+  document.getElementById('kw-list').innerHTML = selectedKeywords.map(k =>
+    `<span class="sel-chip">${esc(k)}<button onclick="removeKeyword('${k.replace(/'/g, "\\'")}')">×</button></span>`).join('');
+  updateQtyHint();
+}
+function renderAreaList() {
+  document.getElementById('area-list').innerHTML = selectedAreas.map(a =>
+    `<span class="sel-chip">${esc(a)}<button onclick="removeArea('${a.replace(/'/g, "\\'")}')">×</button></span>`).join('');
+  updateQtyHint();
+}
+function updateQtyHint() {
+  const k = selectedKeywords.length || (document.getElementById('keyword').value.trim() ? 1 : 0);
+  const a = selectedAreas.length || (document.getElementById('area').value.trim() ? 1 : 0);
+  const el = document.getElementById('qty-hint');
+  if (k && a) el.textContent = `· ${k} KW × ${a} AREA = ${k * a} QUERIES`;
+  else el.textContent = '';
+}
+function addKeyword(k) {
+  k = k.trim();
+  if (!k || selectedKeywords.includes(k)) return;
+  selectedKeywords.push(k);
+  document.getElementById('keyword').value = '';
+  renderKwList(); rememberKeyword(k);
+}
+function removeKeyword(k) { selectedKeywords = selectedKeywords.filter(x => x !== k); renderKwList(); }
+function addKeywordFromInput() { addKeyword(document.getElementById('keyword').value); }
+function addArea(a) {
+  a = a.trim();
+  if (!a || selectedAreas.includes(a)) return;
+  selectedAreas.push(a);
+  document.getElementById('area').value = '';
+  renderAreaList();
+}
+function removeArea(a) { selectedAreas = selectedAreas.filter(x => x !== a); renderAreaList(); }
+function addAreaFromInput() { addArea(document.getElementById('area').value); }
+document.getElementById('keyword').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addKeywordFromInput(); } });
+document.getElementById('area').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addAreaFromInput(); } });
+document.getElementById('keyword').addEventListener('input', debounceSuggest);
+document.getElementById('keyword').addEventListener('input', updateQtyHint);
+document.getElementById('area').addEventListener('input', updateQtyHint);
 
 /* ================= suggestions ================= */
-function getKey() { return EMBEDDED_KEY; }
-
 async function fetchSuggestions(kw) {
   try {
     const r = await fetch(GEMINI_URL + '?key=' + encodeURIComponent(EMBEDDED_KEY), {
@@ -275,20 +341,16 @@ async function fetchSuggestions(kw) {
     return [];
   }
 }
-
 function localSuggestions(kw) {
   const k = kw.toLowerCase().trim();
   if (SUGGESTION_DICT[k]) return SUGGESTION_DICT[k];
   return SUFFIX_FALLBACK.slice(0, 6).map(s => `${kw} ${s}`);
 }
-
 function renderChips(list, dim) {
   const box = document.getElementById('kw-chips');
   box.innerHTML = list.map(k =>
-    `<button onclick="useKeyword('${k.replace(/'/g, "\\'")}')" class="${dim ? 'chip-dim' : 'chip'}">${k.replace(/</g, '&lt;')}</button>`).join('');
+    `<button onclick="addKeyword('${k.replace(/'/g, "\\'")}')" class="${dim ? 'chip-dim' : 'chip'}">${esc(k)}</button>`).join('');
 }
-function useKeyword(k) { document.getElementById('keyword').value = k; }
-
 function debounceSuggest() {
   const kw = document.getElementById('keyword').value.trim();
   clearTimeout(sugTimer);
@@ -296,11 +358,11 @@ function debounceSuggest() {
   const spinner = document.getElementById('sug-spinner');
   if (!kw) {
     let recent = []; try { recent = JSON.parse(localStorage.getItem('places_recent_kw') || '[]'); } catch (e) {}
-    label.textContent = recent.length ? 'RECENT' : '—';
+    label.textContent = recent.length ? 'RECENT — CLICK TO ADD' : '—';
     renderChips(recent, true);
     return;
   }
-  label.textContent = 'SUGGESTIONS';
+  label.textContent = 'SUGGESTIONS — CLICK TO ADD';
   spinner.classList.remove('hidden');
   renderChips([]);
   sugTimer = setTimeout(async () => {
@@ -333,7 +395,6 @@ function updateBudgetUI() {
   bar.style.width = pct + '%';
   bar.style.background = pct >= 90 ? 'linear-gradient(90deg,#dc2626,#ef4444)' : 'linear-gradient(90deg,#E8751A,#FBBF24)';
 }
-
 function rememberKeyword(k) {
   if (!k) return;
   let recent = []; try { recent = JSON.parse(localStorage.getItem('places_recent_kw') || '[]'); } catch (e) {}
@@ -354,71 +415,86 @@ function isMobile(ph) {
 function showRunStatus(t) { document.getElementById('run-status').textContent = t; }
 
 async function runSearch() {
-  const kw = document.getElementById('keyword').value.trim();
-  const area = document.getElementById('area').value.trim();
-  if (!kw) { alert('Enter a keyword.'); return; }
+  if (!onOfficialDomain) { showRunStatus('✖ SEARCH DISABLED — OPEN THE OFFICIAL URL'); return; }
+  if (getUsage() >= FREE_CAP) { showRunStatus('🛑 MONTHLY CAP REACHED (5,000).'); return; }
+
+  const kws = [...selectedKeywords];
+  const kwInput = document.getElementById('keyword').value.trim();
+  if (!kws.length && kwInput) kws.push(kwInput);
+  const areas = [...selectedAreas];
+  const areaInput = document.getElementById('area').value.trim();
+  if (!areas.length && areaInput) areas.push(areaInput);
+  if (!areas.length) areas.push('');
+  if (!kws.length) { alert('Add a keyword first (type + ADD, or click a suggestion chip).'); return; }
+
   const maxResults = parseInt(document.getElementById('max').value) || 60;
   const region = document.getElementById('region').value;
   const mobileOnly = document.getElementById('mobile-only').checked;
 
-  if (getUsage() >= FREE_CAP) {
-    showRunStatus('🛑 MONTHLY CAP REACHED (5,000). WAIT FOR NEXT MONTH.');
-    return;
-  }
-
-  rememberKeyword(kw);
   rows = []; seen = new Set();
   document.getElementById('tbody').innerHTML = '';
   document.getElementById('empty-state').classList.add('hidden');
   resetStats();
   updateExportState();
 
-  let pageToken = null, fetched = 0, dup = 0, closed = 0, nonmobile = 0, req = 0;
+  let fetched = 0, dup = 0, closed = 0, nonmobile = 0, req = 0;
   running = true; stopFlag = false;
   document.getElementById('run-btn').classList.add('hidden');
   document.getElementById('stop-btn').classList.remove('hidden');
 
-  const textQuery = area ? `${kw} in ${area}` : kw;
-  showRunStatus('▸ INITIALIZING…');
+  const totalQueries = kws.length * areas.length;
+  let qi = 0;
 
-  try {
-    while (running && rows.length < maxResults && req < FREE_CAP - getUsage()) {
-      const payload = { textQuery, pageSize: 20, languageCode: 'en', regionCode: region };
-      if (pageToken) payload.pageToken = pageToken;
+  outer:
+  for (const area of areas) {
+    for (const kw of kws) {
+      qi++;
+      if (!running || stopFlag) break outer;
+      if (getUsage() >= FREE_CAP) { showRunStatus('🛑 MONTHLY CAP REACHED (5,000).'); break outer; }
 
-      const resp = await fetch(API_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': getKey(), 'X-Goog-FieldMask': FIELDS },
-        body: JSON.stringify(payload)
-      });
+      let pageToken = null;
+      const label = area ? `${kw} @ ${area}` : kw;
+      showRunStatus(`▸ QUERY ${qi}/${totalQueries} · ${label}`);
 
-      if (resp.status === 403 || resp.status === 404) {
-        const t = await resp.text();
-        showRunStatus('✖ API REJECTED KEY (' + resp.status + ') — PLACES API ENABLED? KEY RESTRICTED?');
-        break;
+      while (running && !stopFlag && getUsage() < FREE_CAP) {
+        const payload = { textQuery: area ? `${kw} in ${area}` : kw, pageSize: 20, languageCode: 'en', regionCode: region };
+        if (pageToken) payload.pageToken = pageToken;
+
+        let resp;
+        try {
+          resp = await fetch(API_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': EMBEDDED_KEY, 'X-Goog-FieldMask': FIELDS },
+            body: JSON.stringify(payload)
+          });
+        } catch (e) {
+          showRunStatus('✖ NETWORK/CORS ERROR: ' + e.message);
+          break outer;
+        }
+        if (resp.status === 403 || resp.status === 404) {
+          showRunStatus('✖ API REJECTED KEY (' + resp.status + ') — PLACES API ENABLED? KEY RESTRICTED?');
+          break outer;
+        }
+        if (!resp.ok) { showRunStatus('✖ HTTP ' + resp.status); break outer; }
+
+        req++; addUsage(1);
+        const data = await resp.json();
+        const places = data.places || [];
+        showRunStatus(`▸ QUERY ${qi}/${totalQueries} · ${label} · PAGE ${Math.ceil(req)}`);
+
+        for (const p of places) {
+          fetched++;
+          if (p.businessStatus === 'CLOSED_PERMANENTLY') { closed++; continue; }
+          if (seen.has(p.id)) { dup++; continue; }
+          seen.add(p.id);
+          if (mobileOnly && !isMobile(phoneOf(p))) { nonmobile++; continue; }
+          rows.push(p);
+          appendRow(p, rows.length);
+        }
+        pageToken = data.nextPageToken || null;
+        if (!pageToken) break;
       }
-      if (!resp.ok) { showRunStatus('✖ HTTP ' + resp.status + ' — ' + (await resp.text()).slice(0, 120)); break; }
-
-      req++; addUsage(1);
-      const data = await resp.json();
-      const places = data.places || [];
-      showRunStatus(`▸ PAGE ${Math.ceil(req)} · ${fetched} FETCHED · ${rows.length} KEPT`);
-
-      for (const p of places) {
-        fetched++;
-        if (p.businessStatus === 'CLOSED_PERMANENTLY') { closed++; continue; }
-        if (seen.has(p.id)) { dup++; continue; }
-        seen.add(p.id);
-        if (mobileOnly && !isMobile(phoneOf(p))) { nonmobile++; continue; }
-        rows.push(p);
-        appendRow(p, rows.length);
-      }
-      pageToken = data.nextPageToken || null;
-      if (!pageToken) { showRunStatus('▸ ALL PAGES FETCHED — NO MORE RESULTS FROM GOOGLE'); break; }
     }
-  } catch (e) {
-    showRunStatus('✖ NETWORK/CORS ERROR: ' + e.message);
-    console.error(e);
   }
 
   running = false;
@@ -432,8 +508,8 @@ async function runSearch() {
   document.getElementById('st-nonmobile').textContent = nonmobile;
   updateExportState();
   const statusEl = document.getElementById('run-status');
-  if (!statusEl.textContent.includes('✖') && !statusEl.textContent.includes('ALL PAGES')) {
-    showRunStatus(`✓ COMPLETE — ${rows.length} COMPANIES · ${req} REQUEST${req === 1 ? '' : 'S'}`);
+  if (!statusEl.textContent.includes('✖') && !statusEl.textContent.includes('CAP')) {
+    showRunStatus(`✓ COMPLETE — ${rows.length} COMPANIES · ${qi}/${totalQueries} QUERIES · ${req} REQ`);
   }
   if (rows.length === 0) document.getElementById('empty-state').classList.remove('hidden');
 }
@@ -483,8 +559,8 @@ function exportExcel() {
   ws['!cols'] = [{ wch: 32 }, { wch: 60 }, { wch: 20 }, { wch: 45 }];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Places');
-  const kw = (document.getElementById('keyword').value.trim() || 'search').replace(/[^a-z0-9]+/gi, '_');
-  const area = (document.getElementById('area').value.trim() || 'all').replace(/[^a-z0-9]+/gi, '_');
+  const kw = (selectedKeywords[0] || document.getElementById('keyword').value.trim() || 'search').replace(/[^a-z0-9]+/gi, '_');
+  const area = (selectedAreas[0] || document.getElementById('area').value.trim() || 'all').replace(/[^a-z0-9]+/gi, '_');
   const date = new Date().toISOString().slice(0, 10);
   XLSX.writeFile(wb, `${kw}_${area}_${date}.xlsx`);
   showRunStatus('✓ EXPORTED ' + rows.length + ' COMPANIES');
@@ -501,7 +577,8 @@ function clearTable() {
 
 /* ================= init ================= */
 updateBudgetUI();
-document.getElementById('keyword').addEventListener('input', debounceSuggest);
+renderKwList();
+renderAreaList();
 debounceSuggest();
 </script>
 </body>
