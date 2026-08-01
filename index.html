@@ -116,7 +116,7 @@
     </div>
 
     <div class="flex gap-2 mb-4">
-      <button id="mode-batch" onclick="setMode('batch')" class="mode-btn mode-active">KEYWORD × AREA</button>
+      <button id="mode-batch" onclick="setMode('batch')" class="mode-btn">KEYWORD × AREA</button>
       <button id="mode-grid" onclick="setMode('grid')" class="mode-btn">GRID SWEEP</button>
     </div>
 
@@ -149,31 +149,31 @@
     </div>
 
     <div id="panel-grid" class="hidden">
-      <div class="grid md:grid-cols-4 gap-4">
+      <div class="grid md:grid-cols-2 gap-4">
         <div>
           <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Keyword</label>
-          <input id="grid-kw" placeholder="e.g. flooring company" class="field mt-1.5">
+          <input id="grid-kw" placeholder="e.g. restaurant" class="field mt-1.5">
         </div>
         <div>
-          <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Center Lat</label>
-          <input id="grid-lat" type="number" step="0.0001" value="3.1390" class="field mt-1.5 mono">
-        </div>
-        <div>
-          <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Center Lng</label>
-          <input id="grid-lng" type="number" step="0.0001" value="101.6869" class="field mt-1.5 mono">
-        </div>
-        <div>
-          <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Radius <span class="text-slate-600">(km)</span></label>
-          <input id="grid-radius" type="number" min="5" max="50" value="15" oninput="updateGridEst()" class="field mt-1.5 mono">
+          <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Area Name</label>
+          <div class="flex gap-2 mt-1.5">
+            <input id="grid-area" placeholder="e.g. Desa Petaling, Shah Alam…" autocomplete="off" class="field" onkeydown="if(event.key==='Enter'){event.preventDefault();locateArea();}">
+            <button onclick="locateArea()" class="shrink-0 mono text-[11px] bg-white/5 hover:bg-white/10 border border-white/15 text-white font-semibold px-4 rounded-lg transition-colors">LOCATE</button>
+          </div>
+          <p id="grid-center" class="mono text-[10px] text-slate-600 mt-1.5">—</p>
         </div>
       </div>
-      <div class="grid md:grid-cols-2 gap-4 mt-4">
+      <div class="grid md:grid-cols-3 gap-4 mt-4">
         <div>
-          <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Cell Size <span id="cell-val" class="text-[#E8751A] font-bold">3</span> km</label>
-          <input id="grid-cell" type="range" min="1" max="5" step="1" value="3" oninput="document.getElementById('cell-val').textContent=this.value;updateGridEst()" class="mt-3 w-full">
+          <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Radius <span class="text-slate-600">(km)</span></label>
+          <input id="grid-radius" type="number" min="1" max="50" value="5" oninput="updateGridEst()" class="field mt-1.5 mono">
+        </div>
+        <div>
+          <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Cell Size <span id="cell-val" class="text-[#E8751A] font-bold">2</span> km</label>
+          <input id="grid-cell" type="range" min="1" max="5" step="1" value="2" oninput="document.getElementById('cell-val').textContent=this.value;updateGridEst()" class="mt-3 w-full">
         </div>
         <div class="flex items-end">
-          <p class="mono text-[10px] text-slate-600 pb-2 leading-relaxed">AUTO-GRID · EACH CELL = TOP 60 · GLOBAL DEDUP<br><span id="grid-est" class="text-[#E8751A]">~36 CELLS · ~108 REQ</span></p>
+          <p class="mono text-[10px] text-slate-600 pb-2 leading-relaxed">AUTO-GRID FROM AREA CENTER · EACH CELL = TOP 60 · GLOBAL DEDUP<br><span id="grid-est" class="text-[#E8751A]">~9 CELLS · ~27 REQ</span></p>
         </div>
       </div>
     </div>
@@ -316,7 +316,7 @@ if (!onOfficialDomain) {
   document.getElementById('run-btn').disabled = true;
 }
 
-let mode = 'batch';
+let mode = 'grid';
 function setMode(m) {
   mode = m;
   document.getElementById('mode-batch').className = 'mode-btn' + (m === 'batch' ? ' mode-active' : '');
@@ -324,9 +324,26 @@ function setMode(m) {
   document.getElementById('panel-batch').classList.toggle('hidden', m !== 'batch');
   document.getElementById('panel-grid').classList.toggle('hidden', m !== 'grid');
 }
+let gridCenter = null;
+async function locateArea() {
+  const name = document.getElementById('grid-area').value.trim();
+  if (!name) { alert('Enter an area name first.'); return; }
+  const readout = document.getElementById('grid-center');
+  readout.textContent = '▸ LOCATING…';
+  try {
+    const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=my&q=' + encodeURIComponent(name));
+    if (!r.ok) throw new Error('http ' + r.status);
+    const j = await r.json();
+    if (!j || !j[0]) { readout.textContent = '✖ NOT FOUND — TRY ANOTHER NAME'; gridCenter = null; return; }
+    gridCenter = { lat: parseFloat(j[0].lat), lng: parseFloat(j[0].lon) };
+    const short = j[0].display_name.split(',').slice(0, 2).join(',');
+    readout.textContent = '● CENTER ' + gridCenter.lat.toFixed(4) + ', ' + gridCenter.lng.toFixed(4) + ' · ' + short;
+    updateGridEst();
+  } catch (e) { readout.textContent = '✖ LOCATE FAILED: ' + e.message; gridCenter = null; }
+}
 function updateGridEst() {
-  const R = parseFloat(document.getElementById('grid-radius').value) || 15;
-  const c = parseInt(document.getElementById('grid-cell').value) || 3;
+  const R = parseFloat(document.getElementById('grid-radius').value) || 5;
+  const c = parseInt(document.getElementById('grid-cell').value) || 2;
   const box = R * 2000, step = c * 2000 * 0.9;
   const n = Math.max(1, Math.ceil(box / step));
   document.getElementById('grid-est').textContent = '~' + (n * n) + ' CELLS · ~' + (n * n * 3) + ' REQ';
@@ -592,11 +609,16 @@ async function runSearch() {
 async function runGridSweep() {
   const kw = document.getElementById('grid-kw').value.trim();
   if (!kw) { alert('Enter a keyword for the grid sweep.'); return; }
-  const clat = parseFloat(document.getElementById('grid-lat').value);
-  const clng = parseFloat(document.getElementById('grid-lng').value);
-  const radiusKm = parseFloat(document.getElementById('grid-radius').value) || 15;
-  const cellKm = parseInt(document.getElementById('grid-cell').value) || 3;
-  if (isNaN(clat) || isNaN(clng)) { alert('Enter valid center lat/lng.'); return; }
+  if (!gridCenter) {
+    const areaName = document.getElementById('grid-area').value.trim();
+    if (!areaName) { alert('Enter an area name (e.g. Desa Petaling) and press LOCATE.'); return; }
+    showRunStatus('▸ LOCATING AREA…');
+    await locateArea();
+  }
+  if (!gridCenter) { alert('Could not locate the area — try a different name.'); return; }
+  const clat = gridCenter.lat, clng = gridCenter.lng;
+  const radiusKm = parseFloat(document.getElementById('grid-radius').value) || 5;
+  const cellKm = parseInt(document.getElementById('grid-cell').value) || 2;
   const maxResults = parseInt(document.getElementById('max').value) || 60;
   const region = document.getElementById('region').value;
   const mobileOnly = document.getElementById('mobile-only').checked;
@@ -738,6 +760,7 @@ function clearTable() {
 updateBudgetUI();
 refreshLiveUsage();
 renderKwList();
+setMode(mode);
 renderAreaList();
 debounceSuggest();
 </script>
