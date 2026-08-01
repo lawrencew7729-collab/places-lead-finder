@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PLACES // LEAD FINDER</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root { --brand: #E8751A; --cyan: #22D3EE; }
+  html { color-scheme: dark; }
+  body {
+    font-family: 'Inter', system-ui, sans-serif;
+    background: #070B14;
+  }
+  .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+
+  /* cyber grid + glows */
+  body::before {
+    content: ''; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+    background:
+      radial-gradient(55% 45% at 82% -5%, rgba(232,117,26,0.10), transparent 65%),
+      radial-gradient(45% 40% at 8% 105%, rgba(34,211,238,0.07), transparent 60%),
+      linear-gradient(rgba(255,255,255,0.028) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.028) 1px, transparent 1px);
+    background-size: auto, auto, 44px 44px, 44px 44px;
+  }
+  /* top scanline */
+  body::after {
+    content: ''; position: fixed; top: 0; left: 0; right: 0; height: 2px; z-index: 50; pointer-events: none;
+    background: linear-gradient(90deg, transparent, rgba(232,117,26,0.8), rgba(34,211,238,0.5), transparent);
+  }
+
+  .glass {
+    background: rgba(255,255,255,0.028);
+    border: 1px solid rgba(255,255,255,0.08);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+  }
+  .glass-strong {
+    background: rgba(11,17,32,0.75);
+    border: 1px solid rgba(255,255,255,0.09);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+  }
+  .glow-orange { box-shadow: 0 0 22px rgba(232,117,26,0.35), 0 8px 30px rgba(232,117,26,0.18); }
+  .glow-text { text-shadow: 0 0 18px rgba(232,117,26,0.55); }
+
+  @keyframes fadeInRow { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+  .row-in { animation: fadeInRow .28s ease both; }
+  @keyframes pulseDot { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+  .pulse { animation: pulseDot 1.7s ease-in-out infinite; }
+  @keyframes barGlow { 0%,100% { filter: brightness(1); } 50% { filter: brightness(1.25); } }
+  .bar-glow { animation: barGlow 2.4s ease-in-out infinite; }
+
+  input[type="range"] { accent-color: #E8751A; }
+  select option { background: #0B1120; color: #e2e8f0; }
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.14); border-radius: 5px; }
+  ::-webkit-scrollbar-track { background: rgba(255,255,255,0.03); }
+  .field {
+    width: 100%; background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.10);
+    border-radius: 0.6rem; padding: 0.65rem 0.9rem; font-size: 0.875rem; color: #e2e8f0;
+    outline: none; transition: border-color .2s, box-shadow .2s;
+  }
+  .field::placeholder { color: rgba(148,163,184,0.5); }
+  .field:focus { border-color: #E8751A; box-shadow: 0 0 0 3px rgba(232,117,26,0.15); }
+  .chip {
+    font-size: 11px; padding: 3px 10px; border-radius: 999px;
+    border: 1px solid rgba(232,117,26,0.35); color: #E8751A;
+    transition: all .15s; cursor: pointer; background: rgba(232,117,26,0.06);
+  }
+  .chip:hover { background: rgba(232,117,26,0.18); border-color: #E8751A; }
+</style>
+</head>
+<body class="min-h-screen text-slate-200 antialiased">
+
+<!-- ===== Header ===== -->
+<header class="sticky top-0 z-30 glass-strong border-b border-white/5">
+  <div class="max-w-6xl mx-auto px-4 md:px-6 py-3.5 flex items-center justify-between gap-3">
+    <div class="flex items-center gap-3 min-w-0">
+      <div class="relative shrink-0">
+        <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-[#E8751A] to-[#F59E0B] glow-orange flex items-center justify-center">
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+        </div>
+        <span class="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-emerald-400 pulse shadow-[0_0_8px_rgba(52,211,153,0.9)]"></span>
+      </div>
+      <div class="min-w-0">
+        <h1 class="mono font-bold text-base md:text-lg tracking-widest text-white leading-tight truncate">PLACES<span class="text-[#E8751A] glow-text">//</span>LEAD FINDER</h1>
+        <p class="mono text-[10px] text-slate-500 tracking-widest uppercase truncate">Google Maps · Business Extraction</p>
+      </div>
+    </div>
+    <div class="mono text-[11px] flex items-center gap-2 bg-white/5 border border-white/10 rounded-full px-3.5 py-1.5 text-slate-300 whitespace-nowrap">
+      <span class="w-1.5 h-1.5 rounded-full bg-[#E8751A] pulse"></span>
+      <span id="header-budget">0/5000</span>
+    </div>
+  </div>
+</header>
+
+<main class="max-w-6xl mx-auto px-4 md:px-6 py-6 space-y-5">
+
+  <!-- ===== Card 1: Control Deck ===== -->
+  <section class="glass rounded-2xl p-5 md:p-6">
+    <div class="mono text-[10px] tracking-[0.25em] text-slate-500 uppercase mb-4 flex items-center gap-2">
+      <span class="text-[#E8751A]">▮</span> Control Deck
+    </div>
+
+    <div class="grid md:grid-cols-2 gap-4">
+      <div>
+        <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Keyword</label>
+        <input id="keyword" list="kw-suggest" placeholder="e.g. flooring company" autocomplete="off" class="field mt-1.5">
+        <datalist id="kw-suggest"></datalist>
+        <div id="kw-chips" class="flex flex-wrap gap-1.5 mt-2"></div>
+      </div>
+      <div>
+        <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Area</label>
+        <input id="area" placeholder="e.g. Kuala Lumpur" autocomplete="off" class="field mt-1.5">
+      </div>
+    </div>
+
+    <div class="grid md:grid-cols-3 gap-4 mt-4">
+      <div>
+        <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Max Results <span id="max-val" class="text-[#E8751A] font-bold">60</span></label>
+        <input id="max" type="range" min="20" max="60" step="20" value="60" oninput="document.getElementById('max-val').textContent=this.value" class="mt-3 w-full">
+      </div>
+      <div>
+        <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Region</label>
+        <select id="region" class="field mt-1.5 bg-transparent">
+          <option value="my" selected>🇲🇾 Malaysia</option>
+          <option value="sg">🇸🇬 Singapore</option>
+          <option value="id">🇮🇩 Indonesia</option>
+          <option value="th">🇹🇭 Thailand</option>
+          <option value="us">🇺🇸 United States</option>
+        </select>
+      </div>
+      <div class="flex items-end">
+        <label class="flex items-center gap-2.5 text-sm font-medium cursor-pointer select-none pb-2 text-slate-300">
+          <input id="mobile-only" type="checkbox" class="w-4 h-4 accent-[#E8751A] rounded">
+          Mobile-only <span class="mono text-[10px] text-slate-500">(01X)</span>
+        </label>
+      </div>
+    </div>
+
+    <div class="flex flex-wrap items-center gap-3 mt-5">
+      <button id="run-btn" onclick="runSearch()"
+        class="bg-gradient-to-r from-[#E8751A] to-[#F59E0B] hover:brightness-110 active:scale-[0.98] text-white mono font-bold text-sm px-7 py-3 rounded-xl glow-orange transition-all disabled:opacity-40 disabled:cursor-not-allowed">
+        ▶ RUN SEARCH
+      </button>
+      <button id="stop-btn" onclick="stopSearch()"
+        class="hidden bg-white/5 hover:bg-white/10 border border-white/15 text-white mono font-bold text-sm px-6 py-3 rounded-xl transition-all">
+        ■ STOP
+      </button>
+      <div id="run-status" class="mono text-[11px] text-slate-400 tracking-wide"></div>
+    </div>
+
+    <!-- API Key -->
+    <div class="mt-5 pt-4 border-t border-white/5">
+      <div class="flex items-center gap-2">
+        <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest shrink-0">API Key</label>
+        <input id="api-key" type="password" placeholder="Paste your Google API key — stored locally only"
+               class="field flex-1">
+        <button onclick="saveKey()" class="mono text-[11px] bg-white/5 hover:bg-white/10 border border-white/15 text-white font-semibold px-4 py-2.5 rounded-lg transition-colors">SAVE</button>
+      </div>
+      <p class="mono text-[10px] text-slate-600 mt-2 leading-relaxed">KEY STORED IN THIS BROWSER (LOCALSTORAGE). RECOMMEND: GOOGLE CONSOLE → CREDENTIALS → RESTRICT KEY TO PLACES API ONLY. COUNTER IS APP-LOCAL; AUTHORITATIVE: GOOGLE BILLING → REPORTS.</p>
+    </div>
+  </section>
+
+  <!-- ===== Card 2: Quota Telemetry ===== -->
+  <section class="glass rounded-2xl p-5 md:p-6">
+    <div class="flex flex-wrap items-end justify-between gap-3">
+      <div>
+        <div class="mono text-[10px] tracking-[0.25em] text-slate-500 uppercase flex items-center gap-2">
+          <span class="text-[#22D3EE]">▮</span> Quota Telemetry
+        </div>
+        <p class="text-xs text-slate-500 mt-1.5">Text Search Pro SKU · free tier</p>
+      </div>
+      <div class="text-right">
+        <span id="budget-used" class="mono text-4xl font-bold text-[#E8751A] glow-text">0</span>
+        <span class="mono text-sm text-slate-500">/ 5,000</span>
+        <span id="budget-pct" class="mono text-xs font-bold text-slate-400 ml-2 align-middle"></span>
+      </div>
+    </div>
+    <div class="h-2.5 bg-white/5 rounded-full mt-4 overflow-hidden border border-white/5">
+      <div id="budget-bar" class="h-full rounded-full bar-glow transition-all duration-500" style="width:0%; background:linear-gradient(90deg,#E8751A,#FBBF24); box-shadow:0 0 14px rgba(232,117,26,0.6);"></div>
+    </div>
+    <p class="mono text-[10px] text-slate-600 mt-2.5">APP-LOCAL COUNT ONLY · RESETS MONTHLY · AUTO-STOPS AT 5,000 · OTHER APPS INVISIBLE — LEAVE HEADROOM.</p>
+  </section>
+
+  <!-- ===== Card 3: Result Stream ===== -->
+  <section class="glass rounded-2xl overflow-hidden">
+    <div class="flex flex-wrap items-center justify-between gap-3 px-5 py-4 border-b border-white/5">
+      <div class="flex flex-wrap items-center gap-1.5 mono text-[11px]">
+        <span class="px-2.5 py-1 rounded-md bg-white/5 border border-white/10 text-slate-400">FETCH <span id="st-fetched" class="text-white">0</span></span>
+        <span class="px-2.5 py-1 rounded-md bg-[#E8751A]/10 border border-[#E8751A]/30 text-[#E8751A]">UNIQUE <span id="st-unique" class="font-bold">0</span></span>
+        <span class="px-2.5 py-1 rounded-md bg-white/5 border border-white/10 text-slate-400">DUP <span id="st-dup">0</span></span>
+        <span class="px-2.5 py-1 rounded-md bg-white/5 border border-white/10 text-slate-400">CLOSED <span id="st-closed">0</span></span>
+        <span class="px-2.5 py-1 rounded-md bg-white/5 border border-white/10 text-slate-400">NON-MOB <span id="st-nonmobile">0</span></span>
+        <span class="px-2.5 py-1 rounded-md bg-white/5 border border-white/10 text-slate-400">REQ <span id="st-req">0</span></span>
+      </div>
+      <div class="flex items-center gap-2">
+        <button onclick="clearTable()" class="mono text-[11px] font-semibold text-slate-400 hover:text-white border border-white/10 px-3 py-1.5 rounded-lg transition-colors">CLEAR</button>
+        <button id="export-btn" onclick="exportExcel()" disabled
+          class="bg-gradient-to-r from-[#E8751A] to-[#F59E0B] hover:brightness-110 text-white mono text-[11px] font-bold px-4 py-1.5 rounded-lg shadow-md shadow-orange-500/20 transition-all disabled:opacity-30 disabled:cursor-not-allowed">
+          ⬇ EXPORT .XLSX
+        </button>
+      </div>
+    </div>
+    <div class="overflow-auto max-h-[520px]">
+      <table class="w-full text-sm">
+        <thead class="sticky top-0 z-10">
+          <tr class="bg-[#0B1120]/95 backdrop-blur text-left text-[10px] mono uppercase tracking-[0.18em] text-slate-500">
+            <th class="px-4 py-3 font-semibold">#</th>
+            <th class="px-4 py-3 font-semibold">Company Name</th>
+            <th class="px-4 py-3 font-semibold">Address</th>
+            <th class="px-4 py-3 font-semibold">Phone</th>
+            <th class="px-4 py-3 font-semibold">Website</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+      <div id="empty-state" class="py-20 text-center">
+        <svg class="mx-auto w-10 h-10 mb-4 text-slate-700" fill="none" stroke="currentColor" stroke-width="1.2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg>
+        <p class="mono text-sm text-slate-500 tracking-widest">AWAITING INPUT</p>
+        <p class="mono text-[11px] text-slate-600 mt-2">SET KEYWORD + AREA → RUN SEARCH → LIVE STREAM · DEDUP · CLOSED REMOVED</p>
+      </div>
+    </div>
+  </section>
+
+  <footer class="mono text-center text-[10px] text-slate-700 tracking-widest pb-8 pt-2 border-t border-white/5">
+    PLACES LEAD FINDER · DIRECT GOOGLE PLACES API (NEW) · NO SERVER · DATA STAYS IN YOUR BROWSER
+  </footer>
+</main>
+
+<script>
+/* ================= state ================= */
+const API_URL = 'https://places.googleapis.com/v1/places:searchText';
+const FREE_CAP = 5000;
+const FIELDS = 'places.id,places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.internationalPhoneNumber,places.websiteUri,places.businessStatus,nextPageToken';
+const DEFAULT_KWS = ['flooring company','tiles supplier','parquet','vinyl flooring','renovation contractor','interior design','aircon servicing','security system'];
+
+let rows = [], seen = new Set(), running = false, stopFlag = false;
+
+/* ================= storage helpers ================= */
+function getKey() { return localStorage.getItem('places_key') || ''; }
+function saveKey() {
+  const k = document.getElementById('api-key').value.trim();
+  if (!k) return alert('Paste your API key first.');
+  localStorage.setItem('places_key', k);
+  document.getElementById('api-key').value = '';
+  showRunStatus('✓ API KEY SAVED LOCALLY');
+}
+function monthKey() { return new Date().toISOString().slice(0, 7); }
+function getUsage() {
+  try { return JSON.parse(localStorage.getItem('places_usage') || '{}')[monthKey()] || 0; }
+  catch (e) { return 0; }
+}
+function addUsage(n) {
+  let d = {}; try { d = JSON.parse(localStorage.getItem('places_usage') || '{}'); } catch (e) {}
+  d[monthKey()] = (d[monthKey()] || 0) + n;
+  localStorage.setItem('places_usage', JSON.stringify(d));
+  updateBudgetUI();
+}
+
+/* ================= budget UI ================= */
+function updateBudgetUI() {
+  const used = getUsage(), pct = Math.min(100, Math.round(used / FREE_CAP * 100));
+  document.getElementById('budget-used').textContent = used.toLocaleString();
+  document.getElementById('header-budget').textContent = used.toLocaleString() + '/5000';
+  document.getElementById('budget-pct').textContent = pct + '%';
+  const bar = document.getElementById('budget-bar');
+  bar.style.width = pct + '%';
+  bar.style.background = pct >= 90 ? 'linear-gradient(90deg,#dc2626,#ef4444)' : 'linear-gradient(90deg,#E8751A,#FBBF24)';
+}
+
+/* ================= keyword suggestions ================= */
+function loadSuggestions() {
+  let recent = [];
+  try { recent = JSON.parse(localStorage.getItem('places_recent_kw') || '[]'); } catch (e) {}
+  const all = [...new Set([...recent, ...DEFAULT_KWS])];
+  document.getElementById('kw-suggest').innerHTML = all.map(k => `<option value="${k.replace(/"/g, '&quot;')}"></option>`).join('');
+  document.getElementById('kw-chips').innerHTML = all.slice(0, 8).map(k =>
+    `<button onclick="useKeyword('${k.replace(/'/g, "\\'")}')" class="chip">${k}</button>`).join('');
+}
+function useKeyword(k) { document.getElementById('keyword').value = k; }
+function rememberKeyword(k) {
+  if (!k) return;
+  let recent = []; try { recent = JSON.parse(localStorage.getItem('places_recent_kw') || '[]'); } catch (e) {}
+  recent = [k, ...recent.filter(x => x !== k)].slice(0, 8);
+  localStorage.setItem('places_recent_kw', JSON.stringify(recent));
+  loadSuggestions();
+}
+
+/* ================= phone helpers ================= */
+function phoneOf(p) { return p.nationalPhoneNumber || p.internationalPhoneNumber || ''; }
+function isMobile(ph) {
+  if (!ph) return false;
+  let d = ph.replace(/\D/g, '');
+  if (d.startsWith('60') && d.length >= 10) d = '0' + d.slice(2);
+  return d.startsWith('01');
+}
+
+/* ================= search ================= */
+function showRunStatus(t) { document.getElementById('run-status').textContent = t; }
+
+async function runSearch() {
+  const key = getKey();
+  if (!key) { alert('Save your API key first (API Key field above).'); return; }
+  const kw = document.getElementById('keyword').value.trim();
+  const area = document.getElementById('area').value.trim();
+  if (!kw) { alert('Enter a keyword.'); return; }
+  const maxResults = parseInt(document.getElementById('max').value) || 60;
+  const region = document.getElementById('region').value;
+  const mobileOnly = document.getElementById('mobile-only').checked;
+
+  if (getUsage() >= FREE_CAP) {
+    showRunStatus('🛑 MONTHLY CAP REACHED (5,000). WAIT FOR NEXT MONTH.');
+    return;
+  }
+
+  rememberKeyword(kw);
+  rows = []; seen = new Set();
+  document.getElementById('tbody').innerHTML = '';
+  document.getElementById('empty-state').classList.add('hidden');
+  resetStats();
+  updateExportState();
+
+  let pageToken = null, fetched = 0, dup = 0, closed = 0, nonmobile = 0, req = 0;
+  running = true; stopFlag = false;
+  document.getElementById('run-btn').classList.add('hidden');
+  document.getElementById('stop-btn').classList.remove('hidden');
+
+  const textQuery = area ? `${kw} in ${area}` : kw;
+  showRunStatus('▸ INITIALIZING…');
+
+  try {
+    while (running && rows.length < maxResults && req < FREE_CAP - getUsage()) {
+      const payload = { textQuery, pageSize: 20, languageCode: 'en', regionCode: region };
+      if (pageToken) payload.pageToken = pageToken;
+
+      const resp = await fetch(API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': key, 'X-Goog-FieldMask': FIELDS },
+        body: JSON.stringify(payload)
+      });
+
+      if (resp.status === 403 || resp.status === 404) {
+        const t = await resp.text();
+        showRunStatus('✖ API REJECTED KEY (' + resp.status + ') — PLACES API ENABLED? KEY RESTRICTED? BILLING LINKED?');
+        break;
+      }
+      if (!resp.ok) { showRunStatus('✖ HTTP ' + resp.status + ' — ' + (await resp.text()).slice(0, 120)); break; }
+
+      req++; addUsage(1);
+      const data = await resp.json();
+      const places = data.places || [];
+      showRunStatus(`▸ PAGE ${Math.ceil(req)} · ${fetched} FETCHED · ${rows.length} KEPT`);
+
+      for (const p of places) {
+        fetched++;
+        if (p.businessStatus === 'CLOSED_PERMANENTLY') { closed++; continue; }
+        if (seen.has(p.id)) { dup++; continue; }
+        seen.add(p.id);
+        if (mobileOnly && !isMobile(phoneOf(p))) { nonmobile++; continue; }
+        rows.push(p);
+        appendRow(p, rows.length);
+      }
+      pageToken = data.nextPageToken || null;
+      if (!pageToken) { showRunStatus('▸ ALL PAGES FETCHED — NO MORE RESULTS FROM GOOGLE'); break; }
+    }
+  } catch (e) {
+    showRunStatus('✖ NETWORK/CORS ERROR: ' + e.message);
+    console.error(e);
+  }
+
+  running = false;
+  document.getElementById('stop-btn').classList.add('hidden');
+  document.getElementById('run-btn').classList.remove('hidden');
+  document.getElementById('st-req').textContent = req;
+  document.getElementById('st-fetched').textContent = fetched;
+  document.getElementById('st-unique').textContent = rows.length;
+  document.getElementById('st-dup').textContent = dup;
+  document.getElementById('st-closed').textContent = closed;
+  document.getElementById('st-nonmobile').textContent = nonmobile;
+  updateExportState();
+  const statusEl = document.getElementById('run-status');
+  if (!statusEl.textContent.includes('✖') && !statusEl.textContent.includes('ALL PAGES')) {
+    showRunStatus(`✓ COMPLETE — ${rows.length} COMPANIES · ${req} REQUEST${req === 1 ? '' : 'S'}`);
+  }
+  if (rows.length === 0) document.getElementById('empty-state').classList.remove('hidden');
+}
+function stopSearch() { stopFlag = true; running = false; showRunStatus('■ STOPPED BY USER'); }
+
+function resetStats() {
+  ['st-fetched','st-unique','st-dup','st-closed','st-nonmobile','st-req'].forEach(id =>
+    document.getElementById(id).textContent = '0');
+}
+
+function appendRow(p, n) {
+  const ph = phoneOf(p);
+  const mob = isMobile(ph);
+  const tr = document.createElement('tr');
+  tr.className = 'border-t border-white/5 hover:bg-[#E8751A]/[0.05] transition-colors row-in';
+  tr.innerHTML =
+    '<td class="px-4 py-2.5 text-slate-600 mono text-xs">' + n + '</td>' +
+    '<td class="px-4 py-2.5 font-semibold text-white">' + esc((p.displayName || {}).text || '') + '</td>' +
+    '<td class="px-4 py-2.5 text-slate-400 text-[13px]">' + esc(p.formattedAddress || '') + '</td>' +
+    '<td class="px-4 py-2.5 whitespace-nowrap text-[13px] mono text-slate-300">' +
+      (ph ? (mob ? '<span class="inline-block w-1.5 h-1.5 rounded-full bg-emerald-400 mr-2 align-middle shadow-[0_0_7px_rgba(52,211,153,0.9)]"></span>' : '') + esc(ph) : '<span class="text-slate-600">—</span>') +
+    '</td>' +
+    '<td class="px-4 py-2.5 text-[13px]">' +
+      (p.websiteUri ? '<a href="' + esc(p.websiteUri) + '" target="_blank" rel="noopener" class="text-[#22D3EE] hover:text-[#67e8f9] hover:underline">↗ LINK</a>' : '<span class="text-slate-600">—</span>') +
+    '</td>';
+  document.getElementById('tbody').appendChild(tr);
+  const box = document.getElementById('tbody').parentElement;
+  box.scrollTop = box.scrollHeight;
+}
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+function updateExportState() {
+  document.getElementById('export-btn').disabled = rows.length === 0;
+}
+
+/* ================= export ================= */
+function exportExcel() {
+  if (!rows.length) return;
+  const headers = ['Company Name', 'Address', 'Phone', 'Website'];
+  const data = [headers, ...rows.map(p => [
+    (p.displayName || {}).text || '',
+    p.formattedAddress || '',
+    phoneOf(p),
+    p.websiteUri || ''
+  ])];
+  const ws = XLSX.utils.aoa_to_sheet(data);
+  ws['!cols'] = [{ wch: 32 }, { wch: 60 }, { wch: 20 }, { wch: 45 }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Places');
+  const kw = (document.getElementById('keyword').value.trim() || 'search').replace(/[^a-z0-9]+/gi, '_');
+  const area = (document.getElementById('area').value.trim() || 'all').replace(/[^a-z0-9]+/gi, '_');
+  const date = new Date().toISOString().slice(0, 10);
+  XLSX.writeFile(wb, `${kw}_${area}_${date}.xlsx`);
+  showRunStatus('✓ EXPORTED ' + rows.length + ' COMPANIES');
+}
+
+function clearTable() {
+  if (!rows.length) return;
+  rows = []; seen = new Set();
+  document.getElementById('tbody').innerHTML = '';
+  resetStats();
+  updateExportState();
+  document.getElementById('empty-state').classList.remove('hidden');
+}
+
+/* ================= init ================= */
+updateBudgetUI();
+loadSuggestions();
+if (getKey()) {
+  document.getElementById('api-key').placeholder = 'API KEY SAVED ✓ (PASTE NEW TO REPLACE)';
+}
+</script>
+</body>
+</html>
