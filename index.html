@@ -193,9 +193,12 @@
         <p class="text-xs text-slate-500 mt-1.5">Text Search Pro SKU · free tier · <span id="quota-src" class="mono text-[10px] font-bold px-2 py-0.5 rounded-md bg-white/5 border border-white/10 text-slate-500">APP-LOCAL</span></p>
       </div>
       <div class="text-right">
-        <span id="budget-used" class="mono text-4xl font-bold text-[#E8751A] glow-text">0</span>
-        <span class="mono text-sm text-slate-500">/ 5,000</span>
-        <span id="budget-pct" class="mono text-xs font-bold text-slate-400 ml-2 align-middle"></span>
+        <div class="flex items-baseline justify-end gap-2">
+          <span class="mono text-[11px] text-slate-500 uppercase tracking-widest">REQ Used</span>
+          <span id="budget-used" class="mono text-4xl font-bold text-[#E8751A] glow-text">0</span>
+          <span class="mono text-sm text-slate-500">/ 5,000</span>
+        </div>
+        <p id="budget-pct" class="mono text-[10px] font-bold text-slate-400 mt-1"></p>
       </div>
     </div>
     <div class="h-2.5 bg-white/5 rounded-full mt-4 overflow-hidden border border-white/5">
@@ -425,7 +428,7 @@ function updateBudgetUI() {
   const used = currentUsage(), pct = Math.min(100, Math.round(used / FREE_CAP * 100));
   document.getElementById('budget-used').textContent = used.toLocaleString();
   document.getElementById('header-budget').textContent = used.toLocaleString() + '/5000';
-  document.getElementById('budget-pct').textContent = pct + '%';
+  document.getElementById('budget-pct').textContent = pct + '% of the month';
   const bar = document.getElementById('budget-bar');
   bar.style.width = pct + '%';
   bar.style.background = pct >= 90 ? 'linear-gradient(90deg,#dc2626,#ef4444)' : 'linear-gradient(90deg,#E8751A,#FBBF24)';
