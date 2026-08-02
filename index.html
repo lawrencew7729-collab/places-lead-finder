@@ -6,12 +6,14 @@
 <meta name="theme-color" content="#0ABAB5">
 <link rel="icon" type="image/png" href="/favicon.png">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
-<title>PLACES // LEAD FINDER</title>
+<title>LEAD</title>
+<meta name="apple-mobile-web-app-title" content="LEAD">
 <script>
   /* pre-paint auth gate — runs before body renders, so returning users never see the login-page flash */
   (function () {
     var ok = false;
-    try { ok = localStorage.getItem('plf_auth') === '1'; } catch (e) {}
+    try { ok = sessionStorage.getItem('plf_ok') === '1'; } catch (e) {}
+    try { localStorage.removeItem('plf_auth'); } catch (e) {}   // clear legacy permanent auto-login
     document.documentElement.className += ok ? ' plf-in' : ' plf-out';
   })();
 </script>
@@ -87,13 +89,7 @@
 <!-- ===== Login gate ===== -->
 <div id="login-overlay" class="fixed inset-0 z-50 flex items-center justify-center px-4" style="background:rgba(4,7,15,0.92); backdrop-filter:blur(8px);">
   <div class="glass rounded-2xl p-8 w-full max-w-sm">
-    <div class="flex items-center gap-3 mb-6">
-      <img src="/logo.png" alt="Lead Finder" class="w-10 h-10 object-contain">
-      <div>
-        <h2 class="mono font-bold text-white tracking-widest">PLACES<span class="text-[#0ABAB5]">//</span>LEAD FINDER</h2>
-        <p class="mono text-[9px] text-slate-500 tracking-widest uppercase">Authorized Access Only</p>
-      </div>
-    </div>
+    <p class="mono text-[10px] text-slate-500 tracking-widest uppercase mb-6 text-center">Authorized Access Only</p>
     <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Username</label>
     <input id="login-user" class="field mt-1.5" autocomplete="username" placeholder="username">
     <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest mt-3 block">Password</label>
@@ -323,7 +319,7 @@ function doLogin() {
   const u = document.getElementById('login-user').value.trim();
   const p = document.getElementById('login-pass').value;
   if (u === APP_USER && p === APP_PASS) {
-    localStorage.setItem('plf_auth', '1');
+    try { sessionStorage.setItem('plf_ok', '1'); } catch (e) {}
     document.documentElement.classList.remove('plf-out');
     document.documentElement.classList.add('plf-in');
     document.getElementById('login-overlay').classList.add('hidden');
@@ -332,7 +328,9 @@ function doLogin() {
     document.getElementById('login-err').classList.remove('hidden');
   }
 }
-if (localStorage.getItem('plf_auth') !== '1') {
+let plfAuthed = false;
+try { plfAuthed = sessionStorage.getItem('plf_ok') === '1'; } catch (e) {}
+if (!plfAuthed) {
   document.getElementById('login-overlay').classList.remove('hidden');
 } else {
   document.getElementById('login-overlay').classList.add('hidden');
