@@ -7,6 +7,14 @@
 <link rel="icon" type="image/png" href="/favicon.png">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <title>PLACES // LEAD FINDER</title>
+<script>
+  /* pre-paint auth gate — runs before body renders, so returning users never see the login-page flash */
+  (function () {
+    var ok = false;
+    try { ok = localStorage.getItem('plf_auth') === '1'; } catch (e) {}
+    document.documentElement.className += ok ? ' plf-in' : ' plf-out';
+  })();
+</script>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -15,6 +23,9 @@
 <style>
   :root { --brand: #0ABAB5; --cyan: #22D3EE; }
   html { color-scheme: dark; }
+  /* pre-paint auth gate: returning users skip login page entirely; strangers never see dashboard flash behind overlay */
+  html.plf-in #login-overlay { display: none !important; }
+  html.plf-out header, html.plf-out main { visibility: hidden; }
   body { font-family: 'Inter', system-ui, sans-serif; background: #070B14; }
   .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
 
@@ -313,6 +324,8 @@ function doLogin() {
   const p = document.getElementById('login-pass').value;
   if (u === APP_USER && p === APP_PASS) {
     localStorage.setItem('plf_auth', '1');
+    document.documentElement.classList.remove('plf-out');
+    document.documentElement.classList.add('plf-in');
     document.getElementById('login-overlay').classList.add('hidden');
     document.getElementById('login-err').classList.add('hidden');
   } else {
