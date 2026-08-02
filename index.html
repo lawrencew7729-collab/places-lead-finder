@@ -312,14 +312,14 @@ function doLogin() {
   const u = document.getElementById('login-user').value.trim();
   const p = document.getElementById('login-pass').value;
   if (u === APP_USER && p === APP_PASS) {
-    sessionStorage.setItem('plf_auth', '1');
+    localStorage.setItem('plf_auth', '1');
     document.getElementById('login-overlay').classList.add('hidden');
     document.getElementById('login-err').classList.add('hidden');
   } else {
     document.getElementById('login-err').classList.remove('hidden');
   }
 }
-if (sessionStorage.getItem('plf_auth') !== '1') {
+if (localStorage.getItem('plf_auth') !== '1') {
   document.getElementById('login-overlay').classList.remove('hidden');
 } else {
   document.getElementById('login-overlay').classList.add('hidden');
