@@ -53,6 +53,9 @@
   @keyframes fadeInRow { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
   .row-in { animation: fadeInRow .28s ease both; }
   @keyframes pulseDot { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+  @keyframes spinAnim { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  .login-spin { animation: spinAnim 4s linear infinite; }
+  .login-spin-fast { animation: spinAnim 0.5s linear infinite; }
   .pulse { animation: pulseDot 1.7s ease-in-out infinite; }
   @keyframes barGlow { 0%,100% { filter: brightness(1); } 50% { filter: brightness(1.25); } }
   .bar-glow { animation: barGlow 2.4s ease-in-out infinite; }
@@ -89,7 +92,10 @@
 <!-- ===== Login gate ===== -->
 <div id="login-overlay" class="fixed inset-0 z-50 flex items-center justify-center px-4" style="background:rgba(4,7,15,0.92); backdrop-filter:blur(8px);">
   <div class="glass rounded-2xl p-8 w-full max-w-sm">
-    <p class="mono text-[10px] text-slate-500 tracking-widest uppercase mb-6 text-center">Authorized Access Only</p>
+    <div class="flex justify-center mb-4">
+      <img src="/logo.png" alt="Lead Finder" class="w-14 h-14 object-contain login-spin">
+    </div>
+    <p class="mono text-[10px] text-slate-500 tracking-widest uppercase mb-5 text-center">Authorized Access Only</p>
     <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest">Username</label>
     <input id="login-user" class="field mt-1.5" autocomplete="username" placeholder="username">
     <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest mt-3 block">Password</label>
@@ -319,11 +325,17 @@ function doLogin() {
   const u = document.getElementById('login-user').value.trim();
   const p = document.getElementById('login-pass').value;
   if (u === APP_USER && p === APP_PASS) {
-    try { sessionStorage.setItem('plf_ok', '1'); } catch (e) {}
-    document.documentElement.classList.remove('plf-out');
-    document.documentElement.classList.add('plf-in');
-    document.getElementById('login-overlay').classList.add('hidden');
-    document.getElementById('login-err').classList.add('hidden');
+    const logo = document.querySelector('#login-overlay .login-spin');
+    const btn = document.querySelector('#login-overlay button');
+    if (logo) logo.classList.replace('login-spin', 'login-spin-fast');
+    if (btn) btn.textContent = 'UNLOCKING…';
+    setTimeout(() => {
+      try { sessionStorage.setItem('plf_ok', '1'); } catch (e) {}
+      document.documentElement.classList.remove('plf-out');
+      document.documentElement.classList.add('plf-in');
+      document.getElementById('login-overlay').classList.add('hidden');
+      document.getElementById('login-err').classList.add('hidden');
+    }, 800);
   } else {
     document.getElementById('login-err').classList.remove('hidden');
   }
