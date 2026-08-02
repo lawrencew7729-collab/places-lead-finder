@@ -56,6 +56,8 @@
   @keyframes spinAnim { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
   .login-spin { animation: spinAnim 4s linear infinite; }
   .login-spin-fast { animation: spinAnim 0.5s linear infinite; }
+  .splash-spin { animation: spinAnim 1.6s linear infinite; }
+  .splash-fade { opacity: 0 !important; transition: opacity .45s ease !important; }
   .pulse { animation: pulseDot 1.7s ease-in-out infinite; }
   @keyframes barGlow { 0%,100% { filter: brightness(1); } 50% { filter: brightness(1.25); } }
   .bar-glow { animation: barGlow 2.4s ease-in-out infinite; }
@@ -88,6 +90,12 @@
 </style>
 </head>
 <body class="min-h-screen text-slate-200 antialiased">
+
+<!-- ===== Splash (logo loading, before login) ===== -->
+<div id="splash" class="fixed inset-0 z-[60] flex flex-col items-center justify-center" style="background:#070B14; transition:opacity .45s ease;">
+  <img src="/logo.png" alt="Lead Finder" class="w-24 h-24 object-contain splash-spin">
+  <p class="mono text-[10px] text-slate-500 tracking-[0.35em] uppercase mt-7">Loading</p>
+</div>
 
 <!-- ===== Login gate ===== -->
 <div id="login-overlay" class="fixed inset-0 z-50 flex items-center justify-center px-4" style="background:rgba(4,7,15,0.92); backdrop-filter:blur(8px);">
@@ -347,6 +355,14 @@ if (!plfAuthed) {
 } else {
   document.getElementById('login-overlay').classList.add('hidden');
 }
+
+/* ================= splash → reveal ================= */
+window.addEventListener('load', () => {
+  setTimeout(() => {
+    const s = document.getElementById('splash');
+    if (s) { s.classList.add('splash-fade'); setTimeout(() => { s.style.display = 'none'; }, 500); }
+  }, 1400);
+});
 
 /* ================= domain check ================= */
 const onOfficialDomain = EXPECTED_ORIGINS.includes(location.origin);
