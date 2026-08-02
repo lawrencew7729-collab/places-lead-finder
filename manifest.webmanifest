@@ -1,0 +1,27 @@
+{
+  "name": "LEAD",
+  "short_name": "LEAD",
+  "description": "Google Maps Business Extraction",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#070B14",
+  "theme_color": "#0ABAB5",
+  "icons": [
+    {
+      "src": "/icons-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "/apple-touch-icon.png",
+      "sizes": "180x180",
+      "type": "image/png"
+    }
+  ]
+}
