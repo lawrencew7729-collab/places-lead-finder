@@ -139,6 +139,21 @@ async function handleRemove(req, res, key) {
   return res.json({ ok: true, remaining: rec.devices.length });
 }
 
+async function handleList(req, res, key) {
+  if (!isAdmin(req)) return res.status(403).json({ error: 'forbidden' });
+  const rec = (await kvGet(key)) || { devices: [] };
+  if (!Array.isArray(rec.devices)) rec.devices = [];
+  return res.json({
+    max: MAX_DEVICES,
+    devices: rec.devices.map((d) => ({
+      id: d.id,
+      label: d.label || 'unknown',
+      firstSeen: d.firstSeen || null,
+      lastSeen: d.lastSeen || null,
+    })),
+  });
+}
+
 export default async function handler(req, res) {
   const key = accountKey(req);
   const mode = req.query && req.query.mode;
@@ -148,6 +163,7 @@ export default async function handler(req, res) {
       case 'register':   return await handleRegister(req, res, key, req.query.id);
       case 'reset':      return await handleReset(req, res, key);
       case 'remove':     return await handleRemove(req, res, key);
+      case 'list':       return await handleList(req, res, key);
       default:           return res.status(400).json({ error: 'unknown mode' });
     }
   } catch (err) {
