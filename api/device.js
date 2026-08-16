@@ -4,8 +4,8 @@
    老板意图：客户买一个 account 只许手机+电脑两台用，防跟同行共享。
 
    Storage : Vercel KV (Upstash Redis REST)
-     env UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN
-     （Vercel dashboard → Storage → KV 创建后自动注入）
+     env KV_REST_API_URL / KV_REST_API_TOKEN（新版 Vercel KV 自动注入）
+     或 UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN（旧命名，兼容）
 
    卖家管理 :
      env DEVICE_ADMIN_SECRET  — reset / remove 的钥匙（客户换机/清缓存被锁时解锁用）
@@ -20,8 +20,8 @@ const MAX_DEVICES = 2;          // 一账号 2 台设备
 const TTL = 90 * 24 * 60 * 60;  // 90 天未活跃自动释放名额
 
 function kv() {
-  const url = process.env.UPSTASH_REDIS_REST_URL;
-  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+  const url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!url || !token) return null;
   return { url, token };
 }
