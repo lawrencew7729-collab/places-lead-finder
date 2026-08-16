@@ -114,6 +114,7 @@
     <label class="mono text-[10px] font-semibold text-slate-500 uppercase tracking-widest mt-3 block">Password</label>
     <input id="login-pass" type="password" class="field mt-1.5" autocomplete="current-password" placeholder="••••••••" onkeydown="if(event.key==='Enter'){event.preventDefault();doLogin();}">
     <p id="login-err" class="mono text-[10px] text-red-400 mt-2 hidden">✖ INVALID CREDENTIALS</p>
+    <p id="login-device" class="mono text-[10px] text-slate-500 mt-3 text-center tracking-widest"></p>
     <button onclick="doLogin()" class="w-full mt-4 bg-gradient-to-r from-[#0ABAB5] to-[#22D3EE] hover:brightness-110 text-white mono font-bold text-sm py-3 rounded-xl glow-orange transition-all">
       UNLOCK ▶
     </button>
@@ -334,32 +335,107 @@ let fetched = 0, dup = 0, closed = 0, nonmobile = 0, outRange = 0, req = 0;
 /* ================= access gate (client-side — deters casual use, NOT real security) ================= */
 const APP_USER = 'Lawrence';
 const APP_PASS = '9999'; /* change this to your own password */
-function doLogin() {
+
+/* ===== device lock (server-enforced — 1 account = max 2 devices, e.g. phone + computer) ===== */
+function getDeviceId() {
+  try {
+    let id = localStorage.getItem('plf_dev');
+    if (!id) {
+      id = 'd-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+      localStorage.setItem('plf_dev', id);
+    }
+    return id;
+  } catch (e) {
+    return 'd-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+  }
+}
+const DEVICE_ID = getDeviceId();
+
+function deviceLabel() {
+  const ua = navigator.userAgent;
+  let os = 'Other';
+  if (/Windows/.test(ua)) os = 'Windows';
+  else if (/Mac OS/.test(ua)) os = 'macOS';
+  else if (/iPhone|iPad/.test(ua)) os = 'iOS';
+  else if (/Android/.test(ua)) os = 'Android';
+  else if (/Linux/.test(ua)) os = 'Linux';
+  let br = 'Browser';
+  if (/Edg\//.test(ua)) br = 'Edge';
+  else if (/Chrome\//.test(ua)) br = 'Chrome';
+  else if (/Safari\//.test(ua)) br = 'Safari';
+  else if (/Firefox\//.test(ua)) br = 'Firefox';
+  return br + ' · ' + os;
+}
+
+function enterApp() {
+  try { sessionStorage.setItem('plf_ok', '1'); } catch (e) {}
+  document.documentElement.classList.remove('plf-out');
+  document.documentElement.classList.add('plf-in');
+  document.getElementById('login-overlay').classList.add('hidden');
+  document.getElementById('login-err').classList.add('hidden');
+}
+
+function showLogin(reason) {
+  document.getElementById('login-overlay').classList.remove('hidden');
+  const dev = document.getElementById('login-device');
+  if (dev) dev.textContent = 'THIS DEVICE · ' + deviceLabel();
+  const err = document.getElementById('login-err');
+  if (reason === 'limit') {
+    err.textContent = '✖ DEVICE LIMIT REACHED — 此账号已达 2 设备上限，更换设备请联系卖家';
+    err.classList.remove('hidden');
+  } else {
+    err.classList.add('hidden');
+  }
+}
+
+async function doLogin() {
   const u = document.getElementById('login-user').value.trim();
   const p = document.getElementById('login-pass').value;
-  if (u === APP_USER && p === APP_PASS) {
-    const logo = document.querySelector('#login-overlay .login-spin');
-    const btn = document.querySelector('#login-overlay button');
-    if (logo) logo.classList.replace('login-spin', 'login-spin-fast');
-    if (btn) btn.textContent = 'UNLOCKING…';
-    setTimeout(() => {
-      try { sessionStorage.setItem('plf_ok', '1'); } catch (e) {}
-      document.documentElement.classList.remove('plf-out');
-      document.documentElement.classList.add('plf-in');
-      document.getElementById('login-overlay').classList.add('hidden');
-      document.getElementById('login-err').classList.add('hidden');
-    }, 800);
-  } else {
+  if (u !== APP_USER || p !== APP_PASS) {
+    document.getElementById('login-err').textContent = '✖ INVALID CREDENTIALS';
     document.getElementById('login-err').classList.remove('hidden');
+    return;
+  }
+  const logo = document.querySelector('#login-overlay .login-spin');
+  const btn = document.querySelector('#login-overlay button');
+  if (logo) logo.classList.replace('login-spin', 'login-spin-fast');
+  if (btn) btn.textContent = 'UNLOCKING…';
+  try {
+    const r = await fetch('/api/device?mode=register&id=' + encodeURIComponent(DEVICE_ID), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: DEVICE_ID, label: deviceLabel(), pass: p })
+    });
+    const j = await r.json();
+    if (j.allowed) {
+      setTimeout(enterApp, 400);
+    } else if (j.reason === 'limit') {
+      if (btn) btn.textContent = 'UNLOCK ▶';
+      showLogin('limit');
+    } else {
+      if (btn) btn.textContent = 'UNLOCK ▶';
+      document.getElementById('login-err').textContent = '✖ INVALID CREDENTIALS';
+      document.getElementById('login-err').classList.remove('hidden');
+    }
+  } catch (e) {
+    /* network fail — fall back to local auth so the app still opens */
+    setTimeout(enterApp, 400);
   }
 }
 let plfAuthed = false;
 try { plfAuthed = sessionStorage.getItem('plf_ok') === '1'; } catch (e) {}
-if (!plfAuthed) {
-  document.getElementById('login-overlay').classList.remove('hidden');
-} else {
-  document.getElementById('login-overlay').classList.add('hidden');
-}
+
+/* boot: check this device against the server whitelist */
+(async function boot() {
+  if (plfAuthed) { enterApp(); return; }
+  showLogin();
+  try {
+    const r = await fetch('/api/device?mode=check&id=' + encodeURIComponent(DEVICE_ID), { cache: 'no-store' });
+    const j = await r.json();
+    if (j.allowed) enterApp();
+    else if (j.reason === 'limit') showLogin('limit');
+  } catch (e) { /* keep login visible on network failure */ }
+})();
 
 /* ================= splash → reveal ================= */
 window.addEventListener('load', () => {
