@@ -492,17 +492,32 @@ function debounceSuggest() {
 }
 
 /* ================= area locating ================= */
+/* valid geographic place types — POIs (shop/amenity/building/leisure...) are NOT valid area names */
+const AREA_TYPES_OK = new Set(['road','suburb','city','town','village','hamlet','neighbourhood','municipality','county','state','region','postcode','administrative','residential','quarter','borough','island']);
+function nameMatches(q, display) {
+  if (!q || !display) return false;
+  const tokens = q.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(t => t.length >= 3);
+  if (!tokens.length) return true; /* too short to judge — let type check decide */
+  const dl = display.toLowerCase();
+  return tokens.some(t => dl.includes(t));
+}
 async function locateAreaName(name) {
   try {
-    const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=my&q=' + encodeURIComponent(name));
+    const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=5&countrycodes=my&q=' + encodeURIComponent(name));
     if (!r.ok) throw new Error('http ' + r.status);
     const j = await r.json();
-    if (j && j[0]) return {
-      name,
-      lat: parseFloat(j[0].lat),
-      lng: parseFloat(j[0].lon),
-      bbox: (j[0].boundingbox || []).map(parseFloat)
-    };
+    for (const hit of j || []) {
+      if (!AREA_TYPES_OK.has(hit.type)) continue;          /* skip shops/buildings etc */
+      if (!nameMatches(name, hit.display_name)) continue;  /* skip unrelated matches */
+      return {
+        name,
+        lat: parseFloat(hit.lat),
+        lng: parseFloat(hit.lon),
+        bbox: (hit.boundingbox || []).map(parseFloat),
+        type: hit.type,
+        matched: hit.display_name
+      };
+    }
   } catch (e) { console.warn('locate failed:', name, e.message); }
   return null;
 }
@@ -518,7 +533,10 @@ async function locateArea() {
   }
   gridCenters = found;
   readout.innerHTML = found.length
-    ? found.map(c => '● ' + esc(c.name) + ' → ' + c.lat.toFixed(4) + ', ' + c.lng.toFixed(4)).join('<br>')
+    ? found.map(c => '● ' + esc(c.name) + ' → ' + c.lat.toFixed(4) + ', ' + c.lng.toFixed(4) +
+        (c.matched && c.matched.toLowerCase() !== c.name.toLowerCase()
+          ? ' <span class="text-amber-400">(MATCHED: ' + esc(c.matched.split(',')[0]) + ')</span>'
+          : '')).join('<br>')
     : '✖ NOT FOUND — TRY ANOTHER NAME';
 }
 function toggleAdv() {
@@ -673,9 +691,12 @@ async function runSearch() {
     const combo = combos[ci2];
     const a = combo.a, kw = combo.kw;
     let pageToken = null, pages = 0;
+    const { radiusKm } = gridParamsFor(a);
+    const pass1RadiusM = radiusKm * 1000;
     showRunStatus('▸ FIND ' + (ci2 + 1) + '/' + combos.length + ' · ' + kw + ' @ ' + a.name + ' · PASS 1');
     while (pages < 3 && running && !stopFlag && currentUsage() < FREE_CAP) {
-      const payload = { textQuery: kw + ' in ' + a.name, pageSize: 20, languageCode: 'en', regionCode: curRegion };
+      const payload = { textQuery: kw + ' in ' + a.name, pageSize: 20, languageCode: 'en', regionCode: curRegion,
+        locationBias: { circle: { center: { latitude: a.lat, longitude: a.lng }, radius: pass1RadiusM } } };
       if (pageToken) payload.pageToken = pageToken;
       let resp;
       try { resp = await apiFetch(payload); }
@@ -684,7 +705,7 @@ async function runSearch() {
       if (!resp.ok) { showRunStatus('✖ HTTP ' + resp.status); break outer; }
       req++; addUsage(1);
       const data = await resp.json();
-      processPlaces(data.places, null, null, false);
+      processPlaces(data.places, a, pass1RadiusM, true);
       pages++;
       pageToken = data.nextPageToken || null;
       if (!pageToken) break;
