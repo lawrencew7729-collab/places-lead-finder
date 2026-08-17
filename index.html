@@ -492,33 +492,75 @@ function debounceSuggest() {
 }
 
 /* ================= area locating ================= */
-/* valid geographic place types — POIs (shop/amenity/building/leisure...) are NOT valid area names */
-const AREA_TYPES_OK = new Set(['road','suburb','city','town','village','hamlet','neighbourhood','municipality','county','state','region','postcode','administrative','residential','quarter','borough','island']);
-function nameMatches(q, display) {
+/* valid geographic place types, tiered by quality (best first):
+   tier 1 = settlements/administrative (ideal area anchors),
+   tier 2 = roads/streets (Jalan X, Old Klang Road...),
+   tier 3 = commercial/zone/landmark types (Bangsar South, Mid Valley...).
+   POIs (shop/amenity/building/leisure/station-points...) are NOT valid area names. */
+const AREA_TYPES_TIERS = [
+  ['city','town','village','hamlet','municipality','county','state','region','administrative','suburb','neighbourhood','quarter','borough','residential','postcode','island','district','province'],
+  ['road','trunk','primary','secondary','tertiary','unclassified','residential_road','service','pedestrian','motorway','motorway_link','trunk_link','primary_link','secondary_link','tertiary_link','highway','street'],
+  ['commercial','industrial','retail','office','park','aerodrome','port','quarry','military','leisure','amenity','public_building','mall','university','college','school','hospital','station']
+];
+/* generic road words — not enough to prove a match (jalan gila vs Jalan Gill) */
+const ROAD_GENERIC = new Set(['jalan','road','street','lorong','persiaran','jln','rd','st','highway','jalanan']);
+function nameMatches(q, display, tierIdx) {
   if (!q || !display) return false;
-  const tokens = q.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(t => t.length >= 3);
-  if (!tokens.length) return true; /* too short to judge — let type check decide */
+  const ql = q.toLowerCase();
+  const tokens = ql.replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(t => t.length >= 3);
   const dl = display.toLowerCase();
-  return tokens.some(t => dl.includes(t));
+  if (!tokens.length) return true; /* too short to judge — let type check decide */
+  /* tier 2/3 (roads/zones): require the LAST specific token to appear in the display,
+     so 'jalan gila' cannot latch onto a differently-named road like 'Jalan Gill' */
+  if (tierIdx > 0) {
+    let specific = null;
+    for (let i = tokens.length - 1; i >= 0; i--) {
+      if (!ROAD_GENERIC.has(tokens[i])) { specific = tokens[i]; break; }
+    }
+    if (specific && !dl.includes(specific)) return false;
+  }
+  if (tokens.some(t => dl.includes(t))) return true;
+  /* acronym / alias match: query letters all present in order (USJ → UEP Subang Jaya, TTDI → Taman Tun Dr Ismail) */
+  const qLetters = ql.replace(/[^a-z]/g, '');
+  if (qLetters.length >= 3 && qLetters.length <= 5 && ql === qLetters) {
+    const words = dl.split(',').map(s => s.trim()).filter(Boolean);
+    for (const w of words) {
+      const initials = w.split(/\s+/).map(x => x[0]).filter(Boolean).join('').toLowerCase();
+      if (initials === ql) return true;
+      if (initials.length >= qLetters.length && initials.startsWith(qLetters)) return true;
+    }
+  }
+  return false;
 }
 async function locateAreaName(name) {
-  try {
-    const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=5&countrycodes=my&q=' + encodeURIComponent(name));
-    if (!r.ok) throw new Error('http ' + r.status);
-    const j = await r.json();
-    for (const hit of j || []) {
-      if (!AREA_TYPES_OK.has(hit.type)) continue;          /* skip shops/buildings etc */
-      if (!nameMatches(name, hit.display_name)) continue;  /* skip unrelated matches */
-      return {
-        name,
-        lat: parseFloat(hit.lat),
-        lng: parseFloat(hit.lon),
-        bbox: (hit.boundingbox || []).map(parseFloat),
-        type: hit.type,
-        matched: hit.display_name
-      };
-    }
-  } catch (e) { console.warn('locate failed:', name, e.message); }
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=10&countrycodes=my&q=' + encodeURIComponent(name));
+      if (r.status === 429) {           /* rate-limited: wait and retry */
+        if (attempt < maxAttempts) { await new Promise(res => setTimeout(res, 1500 * attempt)); continue; }
+        throw new Error('rate limited');
+      }
+      if (!r.ok) throw new Error('http ' + r.status);
+      const j = await r.json();
+      for (let ti = 0; ti < AREA_TYPES_TIERS.length; ti++) {
+        const tier = AREA_TYPES_TIERS[ti];
+        for (const hit of j || []) {
+          if (!tier.includes(hit.type)) continue;          /* skip shops/buildings etc */
+          if (!nameMatches(name, hit.display_name, ti)) continue;  /* skip unrelated matches */
+          return {
+            name,
+            lat: parseFloat(hit.lat),
+            lng: parseFloat(hit.lon),
+            bbox: (hit.boundingbox || []).map(parseFloat),
+            type: hit.type,
+            matched: hit.display_name
+          };
+        }
+      }
+      return null; /* no acceptable hit at all */
+    } catch (e) { console.warn('locate failed:', name, e.message); }
+  }
   return null;
 }
 async function locateArea() {
@@ -527,9 +569,10 @@ async function locateArea() {
   const readout = document.getElementById('grid-center');
   readout.textContent = '▸ LOCATING…';
   const found = [];
-  for (const n of names) {
-    const c = await locateAreaName(n);
+  for (let i = 0; i < names.length; i++) {
+    const c = await locateAreaName(names[i]);
     if (c) found.push(c);
+    if (i < names.length - 1) await new Promise(res => setTimeout(res, 1100)); /* Nominatim: 1 req/s politeness */
   }
   gridCenters = found;
   readout.innerHTML = found.length
