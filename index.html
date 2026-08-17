@@ -533,6 +533,7 @@ function nameMatches(q, display, tierIdx) {
   return false;
 }
 async function locateAreaName(name) {
+  name = String(name || '').replace(/[\u00A0\u3000\u2009\u202F]/g, ' ').trim(); /* normalize hidden spaces */
   const maxAttempts = 3;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const ctrl = new AbortController();
@@ -546,11 +547,28 @@ async function locateAreaName(name) {
       }
       if (!r.ok) throw new Error('http ' + r.status);
       const j = await r.json();
+      /* pass 1: strict — tier type AND name tokens match (settlement names like "Kuchai Lama") */
       for (let ti = 0; ti < AREA_TYPES_TIERS.length; ti++) {
         const tier = AREA_TYPES_TIERS[ti];
         for (const hit of j || []) {
-          if (!tier.includes(hit.type)) continue;          /* skip shops/buildings etc */
-          if (!nameMatches(name, hit.display_name, ti)) continue;  /* skip unrelated matches */
+          if (!tier.includes(hit.type)) continue;
+          if (!nameMatches(name, hit.display_name, ti)) continue;
+          return {
+            name,
+            lat: parseFloat(hit.lat),
+            lng: parseFloat(hit.lon),
+            bbox: (hit.boundingbox || []).map(parseFloat),
+            type: hit.type,
+            matched: hit.display_name
+          };
+        }
+      }
+      /* pass 2: loose — tier type alone is enough (translated names: "jalan kelang lama" → "Old Klang Road").
+         UI shows (MATCHED: Old Klang Road) so the user can verify. POIs still rejected (not in tiers). */
+      for (let ti = 0; ti < AREA_TYPES_TIERS.length; ti++) {
+        const tier = AREA_TYPES_TIERS[ti];
+        for (const hit of j || []) {
+          if (!tier.includes(hit.type)) continue;
           return {
             name,
             lat: parseFloat(hit.lat),
