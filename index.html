@@ -328,6 +328,7 @@ let rows = [], seen = new Set(), running = false, stopFlag = false, sugTimer = n
 let liveUsage = null;
 let gridCenters = []; /* [{name, lat, lng, bbox}] */
 let deepPairs = [];   /* (keyword × area) combos that hit the 60 cap — need the deep sweep */
+let deepEstimate = 0; /* est req for the deep sweep (mirrors the CONTINUE button text) */
 let advanced = false;
 let curKw = '', curRegion = 'my', curMobile = false;
 let fetched = 0, dup = 0, closed = 0, nonmobile = 0, outRange = 0, req = 0;
@@ -707,6 +708,7 @@ async function runSearch() {
           if (!(dx === 0 && dy === 0) && Math.hypot(dx, dy) <= radiusM) cells++;
       estReq += 3 + Math.max(0, cells - 1) * 3;
     }
+    deepEstimate = estReq;
     document.getElementById('deep-btn').textContent = '▶ CONTINUE DEEP SEARCH · ' + deepPairs.length + ' COMBO(S) · ~' + estReq + ' REQ';
     document.getElementById('deep-btn').classList.remove('hidden');
     showRunStatus('⚠ ' + deepPairs.length + ' COMBO(S) HIT THE 60 CAP — MORE MAY EXIST · CLICK CONTINUE TO SWEEP THEM ALL');
@@ -720,6 +722,8 @@ async function deepSearch() {
   if (!deepPairs.length || !running) return;
   document.getElementById('deep-btn').classList.add('hidden');
   document.getElementById('stop-btn').classList.remove('hidden');
+  const reqStart = req;
+  let exhausted = 0; /* areas whose cells were all empty — stopped early to save credit */
   outer:
   for (let i = 0; i < deepPairs.length; i++) {
     if (!running || stopFlag) break outer;
@@ -770,12 +774,14 @@ async function deepSearch() {
         if (!(dx === 0 && dy === 0) && Math.hypot(dx, dy) <= radiusM)
           cells.push({ lat: a.lat + dy * latPerM, lng: a.lng + dx * lngPerM });
 
+    let stale = 0;
     for (let ci = 0; ci < cells.length; ci++) {
       if (!running || stopFlag) break outer;
       if (currentUsage() >= FREE_CAP) { showRunStatus('🛑 MONTHLY CAP REACHED (5,000).'); break outer; }
       const c = cells[ci];
       let pageToken = null, pageNo = 0;
-      showRunStatus('▸ DEEP ' + (i + 1) + '/' + deepAreas.length + ' · ' + a.name + ' · CELL ' + (ci + 1) + '/' + cells.length + ' · ' + fetched + ' FETCHED · ' + rows.length + ' KEPT');
+      showRunStatus('▸ DEEP ' + (i + 1) + '/' + deepPairs.length + ' · ' + a.name + ' · CELL ' + (ci + 1) + '/' + cells.length + ' · ' + fetched + ' FETCHED · ' + rows.length + ' KEPT');
+      let cellAdded = 0;
       while (running && !stopFlag && currentUsage() < FREE_CAP) {
         pageNo++;
         const payload = { textQuery: kw + ' in ' + a.name, pageSize: 20, languageCode: 'en', regionCode: curRegion,
@@ -788,15 +794,31 @@ async function deepSearch() {
           req++; addUsage(1);
           const data = await r3.json();
           const added = processPlaces(data.places, a, radiusM, true);
+          cellAdded += added;
           pageToken = data.nextPageToken || null;
           if (!pageToken) break;
           if (pageNo > 1 && added === 0) break;
         } catch (e) { showRunStatus('✖ NETWORK/CORS ERROR: ' + e.message); break outer; }
       }
+      /* anti-waste: 3 consecutive empty cells → this area is fully mined; skip its remaining cells */
+      if (cellAdded === 0) {
+        if (++stale >= 3) { exhausted++; break; }
+      } else {
+        stale = 0;
+      }
     }
   }
   syncStats();
-  finishSearch('✓ COMPLETE — ' + rows.length + ' COMPANIES · ' + gridCenters.length + ' AREAS · ' + req + ' REQ · ' + outRange + ' OUT-OF-RANGE');
+  const used = req - reqStart, saved = Math.max(0, deepEstimate - used);
+  let msg;
+  if (!running || stopFlag) {
+    msg = '■ STOPPED BY USER — ' + rows.length + ' COMPANIES · +' + used + ' REQ OF ~' + deepEstimate + ' · SAVED ~' + saved;
+  } else if (exhausted > 0) {
+    msg = '✓ COMPLETE — ' + rows.length + ' COMPANIES · +' + used + ' REQ (OF ~' + deepEstimate + ') · ' + exhausted + ' AREA(S) FULLY MINED — NO MORE RESULTS, STOPPED EARLY TO SAVE CREDIT';
+  } else {
+    msg = '✓ COMPLETE — ' + rows.length + ' COMPANIES · ' + gridCenters.length + ' AREAS · +' + used + ' REQ (OF ~' + deepEstimate + ')';
+  }
+  finishSearch(msg);
 }
 
 function finishSearch(msg) {
