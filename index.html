@@ -535,8 +535,11 @@ function nameMatches(q, display, tierIdx) {
 async function locateAreaName(name) {
   const maxAttempts = 3;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const ctrl = new AbortController();
+    const to = setTimeout(() => ctrl.abort(), 10000); /* 10s timeout — Nominatim must not hang forever */
     try {
-      const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=10&countrycodes=my&q=' + encodeURIComponent(name));
+      const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=10&countrycodes=my&q=' + encodeURIComponent(name), { signal: ctrl.signal });
+      clearTimeout(to);
       if (r.status === 429 || r.status === 403) {  /* rate-limited / IP blocked: wait and retry */
         if (attempt < maxAttempts) { await new Promise(res => setTimeout(res, 1500 * attempt)); continue; }
         throw new Error('rate limited');
@@ -559,7 +562,7 @@ async function locateAreaName(name) {
         }
       }
       return { name, notFound: true, dbg: 'OK status=' + r.status + ' types=[' + j.map(h => h.type).join(',') + '] t0ok=' + (j[0] ? nameMatches(name, j[0].display_name, 0) : 'none') + ' hits=' + (j || []).length }; /* no acceptable hit at all */
-    } catch (e) { console.warn('locate failed:', name, e.message); if (e && e.message === 'rate limited') return { name, rate: true }; return { name, notFound: true, dbg: 'ERR ' + e.message }; }
+    } catch (e) { clearTimeout(to); console.warn('locate failed:', name, e.message); if (e && e.message === 'rate limited') return { name, rate: true }; return { name, notFound: true, dbg: 'ERR ' + (e.name === 'AbortError' ? 'TIMEOUT (10s)' : e.message) }; }
   }
   return null;
 }
