@@ -537,7 +537,7 @@ async function locateAreaName(name) {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=10&countrycodes=my&q=' + encodeURIComponent(name));
-      if (r.status === 429) {           /* rate-limited: wait and retry */
+      if (r.status === 429 || r.status === 403) {  /* rate-limited / IP blocked: wait and retry */
         if (attempt < maxAttempts) { await new Promise(res => setTimeout(res, 1500 * attempt)); continue; }
         throw new Error('rate limited');
       }
@@ -559,7 +559,7 @@ async function locateAreaName(name) {
         }
       }
       return null; /* no acceptable hit at all */
-    } catch (e) { console.warn('locate failed:', name, e.message); }
+    } catch (e) { console.warn('locate failed:', name, e.message); if (e && e.message === 'rate limited') return { name, rate: true }; }
   }
   return null;
 }
@@ -569,18 +569,24 @@ async function locateArea() {
   const readout = document.getElementById('grid-center');
   readout.textContent = '▸ LOCATING…';
   const found = [];
+  let rateLimited = false;
   for (let i = 0; i < names.length; i++) {
     const c = await locateAreaName(names[i]);
+    if (c && c.rate) { rateLimited = true; continue; }
     if (c) found.push(c);
     if (i < names.length - 1) await new Promise(res => setTimeout(res, 1100)); /* Nominatim: 1 req/s politeness */
   }
   gridCenters = found;
-  readout.innerHTML = found.length
-    ? found.map(c => '● ' + esc(c.name) + ' → ' + c.lat.toFixed(4) + ', ' + c.lng.toFixed(4) +
-        (c.matched && c.matched.toLowerCase() !== c.name.toLowerCase()
-          ? ' <span class="text-amber-400">(MATCHED: ' + esc(c.matched.split(',')[0]) + ')</span>'
-          : '')).join('<br>')
-    : '✖ NOT FOUND — TRY ANOTHER NAME';
+  if (rateLimited && !found.length) {
+    readout.innerHTML = '⚠ LOCATION SERVICE BUSY (RATE LIMITED) — WAIT A FEW SECONDS AND RETRY';
+  } else {
+    readout.innerHTML = found.length
+      ? found.map(c => '● ' + esc(c.name) + ' → ' + c.lat.toFixed(4) + ', ' + c.lng.toFixed(4) +
+          (c.matched && c.matched.toLowerCase() !== c.name.toLowerCase()
+            ? ' <span class="text-amber-400">(MATCHED: ' + esc(c.matched.split(',')[0]) + ')</span>'
+            : '')).join('<br>')
+      : '✖ NOT FOUND — TRY ANOTHER NAME';
+  }
 }
 function toggleAdv() {
   advanced = !advanced;
