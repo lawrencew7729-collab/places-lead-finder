@@ -558,8 +558,8 @@ async function locateAreaName(name) {
           };
         }
       }
-      return null; /* no acceptable hit at all */
-    } catch (e) { console.warn('locate failed:', name, e.message); if (e && e.message === 'rate limited') return { name, rate: true }; }
+      return { name, notFound: true, dbg: 'OK status=' + r.status + ' types=[' + j.map(h => h.type).join(',') + '] t0ok=' + (j[0] ? nameMatches(name, j[0].display_name, 0) : 'none') + ' hits=' + (j || []).length }; /* no acceptable hit at all */
+    } catch (e) { console.warn('locate failed:', name, e.message); if (e && e.message === 'rate limited') return { name, rate: true }; return { name, notFound: true, dbg: 'ERR ' + e.message }; }
   }
   return null;
 }
@@ -569,10 +569,12 @@ async function locateArea() {
   const readout = document.getElementById('grid-center');
   readout.textContent = '▸ LOCATING…';
   const found = [];
+  const dbgs = [];
   let rateLimited = false;
   for (let i = 0; i < names.length; i++) {
     const c = await locateAreaName(names[i]);
     if (c && c.rate) { rateLimited = true; continue; }
+    if (c && c.dbg) dbgs.push(esc(names[i]) + ' [' + esc(c.dbg) + ']');
     if (c) found.push(c);
     if (i < names.length - 1) await new Promise(res => setTimeout(res, 1100)); /* Nominatim: 1 req/s politeness */
   }
@@ -585,7 +587,7 @@ async function locateArea() {
           (c.matched && c.matched.toLowerCase() !== c.name.toLowerCase()
             ? ' <span class="text-amber-400">(MATCHED: ' + esc(c.matched.split(',')[0]) + ')</span>'
             : '')).join('<br>')
-      : '✖ NOT FOUND — TRY ANOTHER NAME';
+      : '✖ NOT FOUND — TRY ANOTHER NAME' + (dbgs.length ? '<br><span class="text-[10px] text-slate-500">DBG: ' + dbgs.join(' | ') + '</span>' : '');
   }
 }
 function toggleAdv() {
