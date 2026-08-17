@@ -492,96 +492,18 @@ function debounceSuggest() {
 }
 
 /* ================= area locating ================= */
-/* valid geographic place types, tiered by quality (best first):
-   tier 1 = settlements/administrative (ideal area anchors),
-   tier 2 = roads/streets (Jalan X, Old Klang Road...),
-   tier 3 = commercial/zone/landmark types (Bangsar South, Mid Valley...).
-   POIs (shop/amenity/building/leisure/station-points...) are NOT valid area names. */
-const AREA_TYPES_TIERS = [
-  ['city','town','village','hamlet','municipality','county','state','region','administrative','suburb','neighbourhood','quarter','borough','residential','postcode','island','district','province'],
-  ['road','trunk','primary','secondary','tertiary','unclassified','residential_road','service','pedestrian','motorway','motorway_link','trunk_link','primary_link','secondary_link','tertiary_link','highway','street'],
-  ['commercial','industrial','retail','office','park','aerodrome','port','quarry','military','leisure','amenity','public_building','mall','university','college','school','hospital','station']
-];
-/* generic road words — not enough to prove a match (jalan gila vs Jalan Gill) */
-const ROAD_GENERIC = new Set(['jalan','road','street','lorong','persiaran','jln','rd','st','highway','jalanan']);
-function nameMatches(q, display, tierIdx) {
-  if (!q || !display) return false;
-  const ql = q.toLowerCase();
-  const tokens = ql.replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter(t => t.length >= 3);
-  const dl = display.toLowerCase();
-  if (!tokens.length) return true; /* too short to judge — let type check decide */
-  /* tier 2/3 (roads/zones): require the LAST specific token to appear in the display,
-     so 'jalan gila' cannot latch onto a differently-named road like 'Jalan Gill' */
-  if (tierIdx > 0) {
-    let specific = null;
-    for (let i = tokens.length - 1; i >= 0; i--) {
-      if (!ROAD_GENERIC.has(tokens[i])) { specific = tokens[i]; break; }
-    }
-    if (specific && !dl.includes(specific)) return false;
-  }
-  if (tokens.some(t => dl.includes(t))) return true;
-  /* acronym / alias match: query letters all present in order (USJ → UEP Subang Jaya, TTDI → Taman Tun Dr Ismail) */
-  const qLetters = ql.replace(/[^a-z]/g, '');
-  if (qLetters.length >= 3 && qLetters.length <= 5 && ql === qLetters) {
-    const words = dl.split(',').map(s => s.trim()).filter(Boolean);
-    for (const w of words) {
-      const initials = w.split(/\s+/).map(x => x[0]).filter(Boolean).join('').toLowerCase();
-      if (initials === ql) return true;
-      if (initials.length >= qLetters.length && initials.startsWith(qLetters)) return true;
-    }
-  }
-  return false;
-}
 async function locateAreaName(name) {
-  name = String(name || '').replace(/[\u00A0\u3000\u2009\u202F]/g, ' ').trim(); /* normalize hidden spaces */
-  const maxAttempts = 3;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const ctrl = new AbortController();
-    const to = setTimeout(() => ctrl.abort(), 10000); /* 10s timeout — Nominatim must not hang forever */
-    try {
-      const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=10&countrycodes=my&q=' + encodeURIComponent(name), { signal: ctrl.signal });
-      clearTimeout(to);
-      if (r.status === 429 || r.status === 403) {  /* rate-limited / IP blocked: wait and retry */
-        if (attempt < maxAttempts) { await new Promise(res => setTimeout(res, 1500 * attempt)); continue; }
-        throw new Error('rate limited');
-      }
-      if (!r.ok) throw new Error('http ' + r.status);
-      const j = await r.json();
-      /* pass 1: strict — tier type AND name tokens match (settlement names like "Kuchai Lama") */
-      for (let ti = 0; ti < AREA_TYPES_TIERS.length; ti++) {
-        const tier = AREA_TYPES_TIERS[ti];
-        for (const hit of j || []) {
-          if (!tier.includes(hit.type)) continue;
-          if (!nameMatches(name, hit.display_name, ti)) continue;
-          return {
-            name,
-            lat: parseFloat(hit.lat),
-            lng: parseFloat(hit.lon),
-            bbox: (hit.boundingbox || []).map(parseFloat),
-            type: hit.type,
-            matched: hit.display_name
-          };
-        }
-      }
-      /* pass 2: loose — tier type alone is enough (translated names: "jalan kelang lama" → "Old Klang Road").
-         UI shows (MATCHED: Old Klang Road) so the user can verify. POIs still rejected (not in tiers). */
-      for (let ti = 0; ti < AREA_TYPES_TIERS.length; ti++) {
-        const tier = AREA_TYPES_TIERS[ti];
-        for (const hit of j || []) {
-          if (!tier.includes(hit.type)) continue;
-          return {
-            name,
-            lat: parseFloat(hit.lat),
-            lng: parseFloat(hit.lon),
-            bbox: (hit.boundingbox || []).map(parseFloat),
-            type: hit.type,
-            matched: hit.display_name
-          };
-        }
-      }
-      return { name, notFound: true, dbg: 'OK status=' + r.status + ' types=[' + j.map(h => h.type).join(',') + '] t0ok=' + (j[0] ? nameMatches(name, j[0].display_name, 0) : 'none') + ' hits=' + (j || []).length }; /* no acceptable hit at all */
-    } catch (e) { clearTimeout(to); console.warn('locate failed:', name, e.message); if (e && e.message === 'rate limited') return { name, rate: true }; return { name, notFound: true, dbg: 'ERR ' + (e.name === 'AbortError' ? 'TIMEOUT (10s)' : e.message) }; }
-  }
+  try {
+    const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=my&q=' + encodeURIComponent(name));
+    if (!r.ok) throw new Error('http ' + r.status);
+    const j = await r.json();
+    if (j && j[0]) return {
+      name,
+      lat: parseFloat(j[0].lat),
+      lng: parseFloat(j[0].lon),
+      bbox: (j[0].boundingbox || []).map(parseFloat)
+    };
+  } catch (e) { console.warn('locate failed:', name, e.message); }
   return null;
 }
 async function locateArea() {
@@ -590,26 +512,14 @@ async function locateArea() {
   const readout = document.getElementById('grid-center');
   readout.textContent = '▸ LOCATING…';
   const found = [];
-  const dbgs = [];
-  let rateLimited = false;
-  for (let i = 0; i < names.length; i++) {
-    const c = await locateAreaName(names[i]);
-    if (c && c.rate) { rateLimited = true; continue; }
-    if (c && c.dbg) dbgs.push(esc(names[i]) + ' [' + esc(c.dbg) + ']');
+  for (const n of names) {
+    const c = await locateAreaName(n);
     if (c) found.push(c);
-    if (i < names.length - 1) await new Promise(res => setTimeout(res, 1100)); /* Nominatim: 1 req/s politeness */
   }
   gridCenters = found;
-  if (rateLimited && !found.length) {
-    readout.innerHTML = '⚠ LOCATION SERVICE BUSY (RATE LIMITED) — WAIT A FEW SECONDS AND RETRY';
-  } else {
-    readout.innerHTML = found.length
-      ? found.map(c => '● ' + esc(c.name) + ' → ' + c.lat.toFixed(4) + ', ' + c.lng.toFixed(4) +
-          (c.matched && c.matched.toLowerCase() !== c.name.toLowerCase()
-            ? ' <span class="text-amber-400">(MATCHED: ' + esc(c.matched.split(',')[0]) + ')</span>'
-            : '')).join('<br>')
-      : '✖ NOT FOUND — TRY ANOTHER NAME' + (dbgs.length ? '<br><span class="text-[10px] text-slate-500">DBG: ' + dbgs.join(' | ') + '</span>' : '');
-  }
+  readout.innerHTML = found.length
+    ? found.map(c => '● ' + esc(c.name) + ' → ' + c.lat.toFixed(4) + ', ' + c.lng.toFixed(4)).join('<br>')
+    : '✖ NOT FOUND — TRY ANOTHER NAME';
 }
 function toggleAdv() {
   advanced = !advanced;
@@ -763,12 +673,9 @@ async function runSearch() {
     const combo = combos[ci2];
     const a = combo.a, kw = combo.kw;
     let pageToken = null, pages = 0;
-    const { radiusKm } = gridParamsFor(a);
-    const pass1RadiusM = radiusKm * 1000;
     showRunStatus('▸ FIND ' + (ci2 + 1) + '/' + combos.length + ' · ' + kw + ' @ ' + a.name + ' · PASS 1');
     while (pages < 3 && running && !stopFlag && currentUsage() < FREE_CAP) {
-      const payload = { textQuery: kw + ' in ' + a.name, pageSize: 20, languageCode: 'en', regionCode: curRegion,
-        locationBias: { circle: { center: { latitude: a.lat, longitude: a.lng }, radius: pass1RadiusM } } };
+      const payload = { textQuery: kw + ' in ' + a.name, pageSize: 20, languageCode: 'en', regionCode: curRegion };
       if (pageToken) payload.pageToken = pageToken;
       let resp;
       try { resp = await apiFetch(payload); }
@@ -777,7 +684,7 @@ async function runSearch() {
       if (!resp.ok) { showRunStatus('✖ HTTP ' + resp.status); break outer; }
       req++; addUsage(1);
       const data = await resp.json();
-      processPlaces(data.places, a, pass1RadiusM, true);
+      processPlaces(data.places, null, null, false);
       pages++;
       pageToken = data.nextPageToken || null;
       if (!pageToken) break;
