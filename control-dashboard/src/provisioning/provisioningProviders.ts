@@ -50,6 +50,16 @@ export interface VercelProvider {
   setRuntimeEnv(projectId: string, env: RuntimeEnvInput): Promise<ProviderResult>;
 }
 
+/**
+ * Ephemeral secret handoff — Stage 5 ONLY.
+ * Consumes the transient customer Places browser key to configure the isolated
+ * deployment, then discards it. The raw value never enters serializable
+ * provisioning state (stages/rollback/audit/DB).
+ */
+export interface SecretHandoff {
+  configurePlacesKey(projectId: string, rawPlacesKey: string): Promise<ProviderResult>;
+}
+
 export interface GoogleProvider {
   verifyReferrer(googleProjectId: string, restrictionExact: string): Promise<ProviderResult>;
   grantMonitoringViewer(googleProjectId: string, centralMonitoringSa: string): Promise<ProviderResult>;
@@ -73,6 +83,8 @@ export interface ProvisioningProviders {
   google: GoogleProvider;
   controlPlane: ControlPlaneProvider;
   health: HealthProvider;
+  /** Ephemeral Stage-5 secret handoff (optional — real adapters provide it). */
+  secrets?: SecretHandoff;
 }
 
 /** Deterministic fake implementation for tests/local verification. */
@@ -147,14 +159,14 @@ export function createFakeProviders(options: { failAt?: string[] } = {}): FakePr
         const fail = maybeFail('cp.insertTenant');
         if (fail) return fail;
         if (tenants.has(input.slug)) return { ok: true, resourceId: tenants.get(input.slug)!.hostname }; // idempotent
-        if (input.keyFingerprint.length !== 8) return { ok: false, reason: 'fingerprint metadata only (8 hex) required' };
+        if (!/^[A-F0-9]{64}$/.test(input.keyFingerprint)) return { ok: false, reason: 'full 64-hex uppercase fingerprint required' };
         tenants.set(input.slug, input);
         return { ok: true, resourceId: input.hostname };
       },
       async insertCustomerConfig(config) {
         const fail = maybeFail('cp.insertCustomerConfig');
         if (fail) return fail;
-        if (config.keyFingerprint.length !== 8) return { ok: false, reason: 'fingerprint metadata only required — raw key refused' };
+        if (!/^[A-F0-9]{64}$/.test(config.keyFingerprint)) return { ok: false, reason: 'full 64-hex uppercase fingerprint required — raw key refused' };
         if (config.quota.monthlyTarget !== 1000 || config.quota.amberPercent !== 90 || config.quota.redPercent !== 100) {
           return { ok: false, reason: 'explicit contract quota required (1000/90/100)' };
         }
@@ -189,5 +201,19 @@ export function createFakeProviders(options: { failAt?: string[] } = {}): FakePr
         return { ok: true, resourceId: hostname };
       },
     },
+    secrets: {
+      async configurePlacesKey(projectId, rawPlacesKey) {
+        const fail = maybeFail('secrets.configurePlacesKey');
+        if (fail) return fail;
+        if (!/^AIza[0-9A-Za-z_-]{30,}$/.test(rawPlacesKey)) return { ok: false, reason: 'invalid Places browser key' };
+        lastConfiguredPlacesKey = rawPlacesKey; // fake keeps the last transient value for assertions
+        return { ok: true, resourceId: projectId };
+      },
+    },
   };
+}
+/** Last raw key handed to the fake secret handoff (test assertion only — never serialized by executor). */
+let lastConfiguredPlacesKey: string | null = null;
+export function lastHandedOffPlacesKey(): string | null {
+  return lastConfiguredPlacesKey;
 }

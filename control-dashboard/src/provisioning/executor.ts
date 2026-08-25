@@ -15,7 +15,7 @@
  */
 import { generateTenantId } from '../domain';
 import { verifyGoldenRelease, type GoldenReleaseIdentity } from './releaseRegistry';
-import { explicitProvisioningQuota, verifyQuotaConsistency, type RuntimeQuotaConfig } from './quotaContract';
+import { explicitProvisioningQuota, runtimeEnvPairs, verifyQuotaConsistency, verifyRuntimeEnvConsistency, type RuntimeQuotaConfig } from './quotaContract';
 import type { ProvisioningProviders } from './provisioningProviders';
 
 export const EXECUTION_GATE_REQUIRED = 'CUSTOMER_PROVISIONING_NOT_AUTHORIZED';
@@ -38,10 +38,15 @@ export interface ProvisioningInput {
   companyName: string;
   slug: string;
   googleProjectId: string;
-  placesKeyFingerprint: string; // 8-hex SHA-256 prefix — raw key NEVER enters the executor
+  placesKeyFingerprint: string; // FULL 64-hex uppercase SHA-256 — raw key NEVER enters the executor state
   goldenRelease: GoldenReleaseIdentity;
   centralMonitoringSa: string;
   executionGate: boolean; // must be true (separately authorized R1 gate)
+}
+
+/** Transient inputs consumed at Stage 5 ONLY and discarded — never serialized. */
+export interface ProvisioningTransientInput {
+  placesApiKey?: string; // raw browser-visible Places key (ephemeral)
 }
 
 export interface ProvisioningResult {
@@ -62,6 +67,7 @@ function initialStages(): StageRecord[] {
 export async function runProvisioning(
   providers: ProvisioningProviders,
   input: ProvisioningInput,
+  transient: ProvisioningTransientInput = {},
 ): Promise<ProvisioningResult> {
   const stages = initialStages();
   const tenantId = generateTenantId();
@@ -110,8 +116,8 @@ export async function runProvisioning(
   // Stage 1 — validate input + create immutable tenant identity (idempotent).
   const tenantOk = await runStage('tenant', async () => {
     if (!input.companyName.trim() || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(input.slug)) return { ok: false, reason: 'invalid company/slug' };
-    // fingerprint must be 8-hex SHA-256 prefix metadata; a raw AIza… key is refused outright
-    if (!/^[0-9a-f]{8}$/i.test(input.placesKeyFingerprint)) return { ok: false, reason: 'fingerprint metadata (8 hex) required; raw key refused' };
+    // FULL 64-hex uppercase SHA-256 fingerprint required; a raw AIza… key is refused outright
+    if (!/^[A-F0-9]{64}$/.test(input.placesKeyFingerprint)) return { ok: false, reason: 'full 64-hex uppercase fingerprint required; raw key refused' };
     const existing = await providers.controlPlane.findTenantBySlug(input.slug);
     if (existing.ok) return { ok: true, resourceId: existing.resourceId };
     return providers.controlPlane.insertTenant({
@@ -141,9 +147,14 @@ export async function runProvisioning(
   const domainOk = await runStage('domain', () => providers.vercel.bindDomain(projectId, hostname));
   if (!domainOk) return finish(providers, tenantId, hostname, stages, rollbackMetadata);
 
-  // Stage 5 — Places key configuration: transient browser key never persisted;
-  // runtime env carries NON-SECRET metadata only (key stays browser-side by design).
+  // Stage 5 — Places key configuration: transient browser key consumed via the
+  // ephemeral secret handoff ONLY (never serialized); runtime env carries
+  // NON-SECRET metadata + the full fingerprint for the isolated deployment.
   const keyOk = await runStage('places_key', async () => {
+    if (providers.secrets && transient.placesApiKey) {
+      const handoff = await providers.secrets.configurePlacesKey(projectId, transient.placesApiKey);
+      if (!handoff.ok) return handoff;
+    }
     const r = await providers.vercel.setRuntimeEnv(projectId, {
       monthlyTarget: quota.monthlyTarget,
       amberPercent: quota.amberPercent,
@@ -153,6 +164,7 @@ export async function runProvisioning(
     });
     return r;
   });
+  // transient raw key is out of scope from here — nothing serialized it
   if (!keyOk) return finish(providers, tenantId, hostname, stages, rollbackMetadata);
 
   // Stage 6 — exact website restriction verification (bounded read-only).
@@ -165,11 +177,15 @@ export async function runProvisioning(
   if (!monitoringOk) return finish(providers, tenantId, hostname, stages, rollbackMetadata);
 
   // Stage 8 — quota/runtime consistency verification (fail-closed):
-  // runtime values must equal the explicit approved contract.
+  // runtime values must equal the explicit approved contract AND the
+  // browser/server ENV pairs must agree (no silent cap divergence).
   const quotaOk = await runStage('quota', async () => {
     const runtime: RuntimeQuotaConfig = { monthlyTarget: quota.monthlyTarget, amberPercent: quota.amberPercent, redPercent: quota.redPercent, enforcementMode: quota.enforcementMode };
     const check = verifyQuotaConsistency(runtime, runtime);
     if (!check.consistent) return { ok: false, reason: `quota mismatch: ${check.reasons.join('; ')}` };
+    const env = runtimeEnvPairs();
+    const envCheck = verifyRuntimeEnvConsistency(env.browser, env.server);
+    if (!envCheck.consistent) return { ok: false, reason: `runtime env mismatch: ${envCheck.reasons.join('; ')}` };
     return { ok: true };
   });
   if (!quotaOk) return finish(providers, tenantId, hostname, stages, rollbackMetadata);

@@ -19,7 +19,7 @@ function input(overrides: Record<string, unknown> = {}) {
     companyName: 'ABC Trading Sdn Bhd',
     slug: 'abc',
     googleProjectId: 'abc-leadfinder-1234',
-    placesKeyFingerprint: '1a2b3c4d',
+    placesKeyFingerprint: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
     goldenRelease: GOLDEN,
     centralMonitoringSa: 'leadfinder-usage-monitor@leadfinder-shared-monitoring.iam.gserviceaccount.com',
     executionGate: true,
@@ -49,8 +49,8 @@ describe('R1 security — raw Places key never enters persistence', () => {
     const result = await runProvisioning(providers, input());
     const readback = await providers.controlPlane.findConfigByTenant(result.tenantId);
     expect(readback.ok).toBe(true);
-    expect(readback.config?.keyFingerprint).toBe('1a2b3c4d');
-    expect(readback.config?.keyFingerprint.length).toBe(8);
+    expect(readback.config?.keyFingerprint).toBe('AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
+    expect(readback.config?.keyFingerprint.length).toBe(64);
     expect(JSON.stringify(readback.config)).not.toContain('AIza');
   });
 

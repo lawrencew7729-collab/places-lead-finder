@@ -18,7 +18,7 @@ function input(overrides: Partial<Parameters<typeof runProvisioning>[1]> = {}) {
     companyName: 'ABC Trading Sdn Bhd',
     slug: 'abc',
     googleProjectId: 'abc-leadfinder-1234',
-    placesKeyFingerprint: '1a2b3c4d',
+    placesKeyFingerprint: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
     goldenRelease: GOLDEN,
     centralMonitoringSa: 'leadfinder-usage-monitor@leadfinder-shared-monitoring.iam.gserviceaccount.com',
     executionGate: true,

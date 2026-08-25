@@ -73,3 +73,42 @@ export function quotaSignal(used: number): Signal {
   if (used >= QUOTA_CONTRACT.amberRequests) return 'amber';
   return 'green';
 }
+
+/**
+ * Runtime ENV pairs — ONE contract propagated to BOTH runtimes:
+ *  - browser Vite runtime reads VITE_CUSTOMER_* (build-time)
+ *  - serverless api/usage reads CUSTOMER_MONTHLY_TARGET
+ * The same constants feed both; provisioning writes both sets and verifies
+ * they agree (mismatch fails closed).
+ */
+export function runtimeEnvPairs() {
+  return {
+    browser: {
+      VITE_CUSTOMER_MONTHLY_TARGET: String(QUOTA_CONTRACT.monthlyTarget),
+      VITE_CUSTOMER_AMBER_PERCENT: String(QUOTA_CONTRACT.amberPercent),
+      VITE_CUSTOMER_RED_PERCENT: String(QUOTA_CONTRACT.redPercent),
+      VITE_CUSTOMER_ENFORCEMENT_MODE: QUOTA_CONTRACT.enforcementMode,
+    },
+    server: {
+      CUSTOMER_MONTHLY_TARGET: String(QUOTA_CONTRACT.monthlyTarget),
+    },
+  };
+}
+
+/** Fail-closed: browser and server env values must agree with each other AND the contract. */
+export function verifyRuntimeEnvConsistency(browserEnv: Record<string, string>, serverEnv: Record<string, string>): { consistent: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+  const pairs = runtimeEnvPairs();
+  const check = (expected: string, actual: string | undefined, label: string) => {
+    if (actual !== expected) reasons.push(`${label} mismatch (${actual ?? 'missing'} ≠ ${expected})`);
+  };
+  check(pairs.browser.VITE_CUSTOMER_MONTHLY_TARGET, browserEnv.VITE_CUSTOMER_MONTHLY_TARGET, 'browser monthly');
+  check(pairs.browser.VITE_CUSTOMER_AMBER_PERCENT, browserEnv.VITE_CUSTOMER_AMBER_PERCENT, 'browser amber');
+  check(pairs.browser.VITE_CUSTOMER_RED_PERCENT, browserEnv.VITE_CUSTOMER_RED_PERCENT, 'browser red');
+  check(pairs.browser.VITE_CUSTOMER_ENFORCEMENT_MODE, browserEnv.VITE_CUSTOMER_ENFORCEMENT_MODE, 'browser enforcement');
+  check(pairs.server.CUSTOMER_MONTHLY_TARGET, serverEnv.CUSTOMER_MONTHLY_TARGET, 'server monthly');
+  if (browserEnv.VITE_CUSTOMER_MONTHLY_TARGET !== serverEnv.CUSTOMER_MONTHLY_TARGET) {
+    reasons.push('browser/server monthly cap disagreement');
+  }
+  return { consistent: reasons.length === 0, reasons };
+}
