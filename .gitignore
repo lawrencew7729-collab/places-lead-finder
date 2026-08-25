@@ -1,3 +1,7 @@
 .vercel
 .env*
 _guide_build/
+_hma_build/
+.hermes/desktop-attachments/
+_fields.html
+_pricing.html
