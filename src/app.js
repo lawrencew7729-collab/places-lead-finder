@@ -1,9 +1,9 @@
 /* ================= config ================= */
 import { applyControlsToElements, controlsFor } from './searchControls.js';
+import { customerQuota } from './config.js';
 const API_URL = 'https://places.googleapis.com/v1/places:searchText';
 const EMBEDDED_KEY = 'AIzaSyBR_uiUSfGZtbk7Nu89sWm7ESTPfMWedFg';
 const EXPECTED_ORIGINS = ['https://places-lead-finder-site.vercel.app', 'https://leadfinder.business'];
-const FREE_CAP = 5000;
 const FIELDS = 'places.id,places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.internationalPhoneNumber,places.websiteUri,places.businessStatus,places.location,nextPageToken';
 
 const SUGGESTION_DICT = {
@@ -263,9 +263,10 @@ function addUsage(n) {
   updateBudgetUI();
 }
 function updateBudgetUI() {
-  const used = currentUsage(), pct = Math.min(100, Math.round(used / FREE_CAP * 100));
+  const quota = customerQuota();
+  const used = currentUsage(), pct = Math.min(100, Math.round(used / quota.monthlyTarget * 100));
   document.getElementById('budget-used').textContent = used.toLocaleString();
-  document.getElementById('header-budget').textContent = used.toLocaleString() + '/5000';
+  document.getElementById('header-budget').textContent = used.toLocaleString() + '/' + quota.monthlyTarget.toLocaleString();
   document.getElementById('budget-pct').textContent = pct + '% of the month';
   const now = new Date();
   const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
@@ -273,7 +274,7 @@ function updateBudgetUI() {
   document.getElementById('reset-info').textContent = 'FREE TIER RESETS IN ' + daysLeft + 'D · ' + next.toISOString().slice(0, 10) + ' (UTC · 8AM MYT)';
   const bar = document.getElementById('budget-bar');
   bar.style.width = pct + '%';
-  bar.style.background = pct >= 90 ? 'linear-gradient(90deg,#dc2626,#ef4444)' : 'linear-gradient(90deg,#0ABAB5,#67E8F9)';
+  bar.style.background = pct >= quota.redPercent ? 'linear-gradient(90deg,#dc2626,#ef4444)' : pct >= quota.amberPercent ? 'linear-gradient(90deg,#f4b942,#fbbf24)' : 'linear-gradient(90deg,#0ABAB5,#67E8F9)';
   const src = document.getElementById('quota-src');
   if (src) {
     const live = liveUsage !== null;
@@ -335,7 +336,8 @@ async function apiFetch(payload) {
 
 async function runSearch() {
   if (!onOfficialDomain) { showRunStatus('✖ SEARCH DISABLED — OPEN THE OFFICIAL URL'); return; }
-  if (currentUsage() >= FREE_CAP) { showRunStatus('🛑 MONTHLY CAP REACHED (5,000).'); return; }
+  const quota = customerQuota();
+  if (currentUsage() >= quota.redRequests) { showRunStatus('🛑 MONTHLY LIMIT REACHED (' + quota.redRequests.toLocaleString() + '). NEW SEARCHES DISABLED — EXISTING RESULTS REMAIN AVAILABLE.'); return; }
 
   const kwInput = document.getElementById('grid-kw').value.trim();
   const kws = kwInput.split(',').map(s => s.trim()).filter(Boolean);
@@ -373,7 +375,7 @@ async function runSearch() {
     const a = combo.a, kw = combo.kw;
     let pageToken = null, pages = 0;
     showRunStatus('▸ FIND ' + (ci2 + 1) + '/' + combos.length + ' · ' + kw + ' @ ' + a.name + ' · PASS 1');
-    while (pages < 3 && running && !stopFlag && currentUsage() < FREE_CAP) {
+    while (pages < 3 && running && !stopFlag && currentUsage() < customerQuota().redRequests) {
       const payload = { textQuery: kw + ' in ' + a.name, pageSize: 20, languageCode: 'en', regionCode: curRegion };
       if (pageToken) payload.pageToken = pageToken;
       let resp;
@@ -429,7 +431,7 @@ async function deepSearch() {
   outer:
   for (let i = 0; i < deepPairs.length; i++) {
     if (!running || stopFlag) break outer;
-    if (currentUsage() >= FREE_CAP) { showRunStatus('🛑 MONTHLY CAP REACHED (5,000).'); break outer; }
+    if (currentUsage() >= customerQuota().redRequests) { showRunStatus('🛑 MONTHLY LIMIT REACHED (' + customerQuota().redRequests.toLocaleString() + '). NEW SEARCHES DISABLED.'); break outer; }
     const pair = deepPairs[i];
     const a = pair.a, kw = pair.kw;
     const { radiusKm, cellKm } = gridParamsFor(a);
@@ -450,7 +452,7 @@ async function deepSearch() {
     processPlaces(probeData.places, a, radiusM, true);
 
     if (probeData.nextPageToken) {
-      while (probeData.nextPageToken && running && !stopFlag && currentUsage() < FREE_CAP) {
+      while (probeData.nextPageToken && running && !stopFlag && currentUsage() < customerQuota().redRequests) {
         const pagePayload = { textQuery: kw + ' in ' + a.name, pageSize: 20, languageCode: 'en', regionCode: curRegion,
           locationBias: { circle: { center: { latitude: a.lat, longitude: a.lng }, radius: radiusM } }, pageToken: probeData.nextPageToken };
         let r2;
@@ -479,12 +481,12 @@ async function deepSearch() {
     let stale = 0;
     for (let ci = 0; ci < cells.length; ci++) {
       if (!running || stopFlag) break outer;
-      if (currentUsage() >= FREE_CAP) { showRunStatus('🛑 MONTHLY CAP REACHED (5,000).'); break outer; }
+      if (currentUsage() >= customerQuota().redRequests) { showRunStatus('🛑 MONTHLY LIMIT REACHED (' + customerQuota().redRequests.toLocaleString() + '). NEW SEARCHES DISABLED.'); break outer; }
       const c = cells[ci];
       let pageToken = null, pageNo = 0;
       showRunStatus('▸ DEEP ' + (i + 1) + '/' + deepPairs.length + ' · ' + a.name + ' · CELL ' + (ci + 1) + '/' + cells.length + ' · ' + fetched + ' FETCHED · ' + rows.length + ' KEPT');
       let cellAdded = 0;
-      while (running && !stopFlag && currentUsage() < FREE_CAP) {
+      while (running && !stopFlag && currentUsage() < customerQuota().redRequests) {
         pageNo++;
         const payload = { textQuery: kw + ' in ' + a.name, pageSize: 20, languageCode: 'en', regionCode: curRegion,
           locationBias: { circle: { center: { latitude: c.lat, longitude: c.lng }, radius: cellKm * 1000 } } };

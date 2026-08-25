@@ -3,7 +3,13 @@
 // this calendar month, using a service account (Monitoring Viewer).
 // Env var: SERVICE_ACCOUNT_JSON = the full service-account JSON key.
 // ESM format (matches root package.json "type": "module" and api/device.js).
+// Quota contract: monthly limit from CUSTOMER_MONTHLY_TARGET env, default 1000 (approved contract).
 import crypto from 'node:crypto';
+
+const CUSTOMER_MONTHLY_TARGET = (() => {
+  const n = Number(process.env.CUSTOMER_MONTHLY_TARGET);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1000;
+})();
 
 const SCOPE = 'https://www.googleapis.com/auth/monitoring.read';
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
@@ -69,14 +75,14 @@ export default async function handler(req, res) {
   res.setHeader('Cache-Control', 'no-store');
   const saJson = process.env.SERVICE_ACCOUNT_JSON;
   if (!saJson) {
-    return res.status(503).json({ error: 'not_configured', used: null, cap: 5000 });
+    return res.status(503).json({ error: 'not_configured', used: null, cap: CUSTOMER_MONTHLY_TARGET });
   }
   try {
     const sa = JSON.parse(saJson);
     const token = await getAccessToken(sa);
     const used = await getPlacesUsage(token, sa.project_id);
-    res.json({ used, cap: 5000, month: new Date().toISOString().slice(0, 7), source: 'monitoring' });
+    res.json({ used, cap: CUSTOMER_MONTHLY_TARGET, month: new Date().toISOString().slice(0, 7), source: 'monitoring' });
   } catch (e) {
-    res.status(500).json({ error: e.message, used: null, cap: 5000 });
+    res.status(500).json({ error: e.message, used: null, cap: CUSTOMER_MONTHLY_TARGET });
   }
 };
