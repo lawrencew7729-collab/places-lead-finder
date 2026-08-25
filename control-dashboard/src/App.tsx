@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -32,6 +32,13 @@ import { sampleTenants } from './mockData';
 import { NewCustomerWizard, type LocalCustomerDraft } from './NewCustomerWizard';
 import { createMockProviderGateway } from './providers';
 import { InMemoryOnboardingRepository } from './onboardingRepository';
+import {
+  resolveAuthorizedProfile,
+  signInOperator,
+  signOutOperator,
+  subscribeToAuthChanges,
+  type OperatorProfile,
+} from './supabase';
 
 
 type Page = 'overview' | 'customers' | 'releases' | 'health' | 'infrastructure' | 'audit';
@@ -48,6 +55,12 @@ const nav: Array<{ id: Page; label: string; icon: typeof LayoutDashboard }> = [
 const statusLabels: Record<Signal, string> = { green: 'Healthy', amber: 'Review', red: 'Blocked', unknown: 'Not checked' };
 const AUTHORITATIVE_INFRASTRUCTURE_STATUS = selectInfrastructureStatus(['unknown', 'amber', 'green']);
 
+type AuthState =
+  | { status: 'checking' }
+  | { status: 'signedOut' }
+  | { status: 'denied' }
+  | { status: 'authorized'; profile: OperatorProfile };
+
 function SignalPill({ signal, children }: { signal: Signal; children?: ReactNode }) {
   return <span className={`signal signal-${signal}`}><span className="signal-dot" />{children ?? statusLabels[signal]}</span>;
 }
@@ -59,15 +72,18 @@ function Metric({ label, value, detail, signal, icon: Icon, testId }: { label: s
   </article>;
 }
 
-function Login({ onReview }: { onReview: () => void }) {
+function Login({ onSignIn, onPreview, submitting, message }: {
+  onSignIn: (email: string, password: string) => void;
+  onPreview: () => void;
+  submitting: boolean;
+  message: string | null;
+}) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [message, setMessage] = useState('');
 
-
-  async function submit(event: FormEvent) {
+  function submit(event: FormEvent) {
     event.preventDefault();
-    setMessage('BLOCKED_BY_P0_GATE: Supabase Auth not connected in P0 local-only composition.');
+    onSignIn(email, password);
   }
 
   return <main className="login-shell">
@@ -84,7 +100,7 @@ function Login({ onReview }: { onReview: () => void }) {
     </section>
     <section className="login-panel">
       <div className="login-card">
-        <span className="phase-tag">PHASE 1 · FOUNDATION</span>
+        <span className="phase-tag">OPERATOR ACCESS</span>
         <h2>Control Dashboard</h2>
         <p>Authorized operator access only.</p>
         <form onSubmit={submit}>
@@ -92,14 +108,14 @@ function Login({ onReview }: { onReview: () => void }) {
           <div className="field"><Fingerprint size={18} /><input id="email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="operator@company.com" required /></div>
           <label htmlFor="password">Password</label>
           <div className="field"><LockKeyhole size={18} /><input id="password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••••••" required /></div>
-          <button className="primary-button" disabled>SIGN IN DISABLED IN P0</button>
+          <button className="primary-button" disabled={submitting}>{submitting ? 'SIGNING IN…' : 'SIGN IN'}</button>
         </form>
         {message && <div className="form-message">{message}</div>}
         {import.meta.env.DEV && <><div className="divider"><span>FOUNDATION PREVIEW</span></div>
-        <button className="review-button" onClick={onReview}>OPEN FOUNDATION REVIEW</button>
-        <p className="review-note"><Database size={14} /> Review mode uses sample data only. No production connection.</p></>}
-        <div className="auth-status"><span className="offline" /> LOCAL MOCK · READ-ONLY · NO EXTERNAL MUTATION</div>
-        <div className="auth-status"><span className="offline" /> Supabase Auth not connected in P0 · Gate S0 BLOCKED</div>
+        <button className="review-button" onClick={onPreview}>OPEN FOUNDATION REVIEW</button>
+        <p className="review-note"><Database size={14} /> Preview mode uses sample data only. No production connection.</p></>}
+        <div className="auth-status"><span className="offline" /> SECURE OPERATOR SIGN-IN · SUPABASE AUTH</div>
+        <div className="auth-status"><span className="offline" /> FAIL-CLOSED ACCESS CONTROL · NO LOCAL BYPASS</div>
       </div>
     </section>
   </main>;
@@ -177,7 +193,7 @@ function Audit() {
   return <><section className="page-heading compact"><div><span className="eyebrow">AUDITABILITY</span><h1>Audit log</h1><p>Who changed what, for which customer, when, and between which states.</p></div></section><div className="notice"><FileClock size={20}/><div><strong>Append-only records</strong><span>Client roles cannot update or delete audit events. Sample events shown below.</span></div></div><article className="timeline">{events.map((event) => <div className="timeline-item" key={event.time+event.action}><span className="timeline-dot"/><time>{event.time}</time><div><strong>{event.action}</strong><span>{event.subject}</span><small>{event.actor} · {event.change}</small></div></div>)}</article></>;
 }
 
-function Dashboard({ onLogout }: { onLogout: () => void }) {
+function Dashboard({ mode, profile, onLogout }: { mode: 'operator' | 'preview'; profile?: OperatorProfile; onLogout: () => void }) {
   const [page, setPage] = useState<Page>('overview');
   const [wizardOpen, setWizardOpen] = useState(false);
   const [localDraft, setLocalDraft] = useState<LocalCustomerDraft | null>(null);
@@ -196,12 +212,81 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
             ? <Infrastructure infrastructureStatus={AUTHORITATIVE_INFRASTRUCTURE_STATUS}/>
             : <Audit/>;
 
-  return <><div className="app-shell"><aside className="sidebar"><div className="sidebar-brand"><span className="logo-box"><RadioTower size={21}/></span><div><strong>LEAD FINDER</strong><small>CONTROL PLANE</small></div></div><div className="environment"><span/> Foundation Review</div><nav>{nav.map(({id,label,icon:Icon}) => <button key={id} aria-label={label} className={page===id?'active':''} onClick={() => setPage(id)}><Icon size={19}/><span>{label}</span>{page===id && <ChevronRight size={15}/>}</button>)}</nav><div className="sidebar-footer"><div className="operator-avatar">LF</div><div><strong>Review Operator</strong><small>Sample session</small></div><button aria-label="Log out" onClick={onLogout}><LogOut size={17}/></button></div></aside><main className="content-shell"><header className="topbar"><div><span className="topbar-status"><span/> CONTROL PLANE ONLY</span></div><div className="topbar-right"><span><Database size={15}/> SAMPLE + LOCAL MOCK</span><button aria-label="Notifications"><BellRing size={18}/><i>2</i></button></div></header><div className="page-content">{pageContent}</div></main></div>{wizardOpen && <NewCustomerWizard gateway={gateway} operator={{ id: 'local-review-admin', role: 'admin', active: true }} repository={repository} resumeTenantId={localDraft?.tenantId} onClose={() => setWizardOpen(false)} onSaveDraft={(draft) => { setLocalDraft(draft); setWizardOpen(false); setPage('customers'); }}/>}</>;
+  const operator = profile
+    ? { id: profile.userId, role: profile.role, active: true }
+    : { id: 'local-review-admin', role: 'admin' as const, active: true };
+
+  return <><div className="app-shell"><aside className="sidebar"><div className="sidebar-brand"><span className="logo-box"><RadioTower size={21}/></span><div><strong>LEAD FINDER</strong><small>CONTROL PLANE</small></div></div><div className="environment"><span/> {mode === 'operator' ? 'Operator Session' : 'Foundation Review'}</div><nav>{nav.map(({id,label,icon:Icon}) => <button key={id} aria-label={label} className={page===id?'active':''} onClick={() => setPage(id)}><Icon size={19}/><span>{label}</span>{page===id && <ChevronRight size={15}/>}</button>)}</nav><div className="sidebar-footer"><div className="operator-avatar">{mode === 'operator' ? 'OP' : 'PV'}</div><div><strong>{mode === 'operator' ? (profile?.displayName ?? 'Operator') : 'Preview Session'}</strong><small>{mode === 'operator' ? `${profile?.role ?? 'admin'} · authenticated` : 'Sample data only'}</small></div><button aria-label="Log out" onClick={onLogout}><LogOut size={17}/></button></div></aside><main className="content-shell"><header className="topbar"><div><span className="topbar-status"><span/> CONTROL PLANE ONLY</span></div><div className="topbar-right"><span><Database size={15}/> {mode === 'operator' ? 'SUPABASE CONNECTED' : 'SAMPLE + LOCAL MOCK'}</span><button aria-label="Notifications"><BellRing size={18}/><i>2</i></button></div></header><div className="page-content">{pageContent}</div></main></div>{wizardOpen && <NewCustomerWizard gateway={gateway} operator={operator} repository={repository} resumeTenantId={localDraft?.tenantId} onClose={() => setWizardOpen(false)} onSaveDraft={(draft) => { setLocalDraft(draft); setWizardOpen(false); setPage('customers'); }}/>}</>;
 }
 
 export default function App() {
-  const [authenticated, setAuthenticated] = useState(false);
-  const logout = async () => setAuthenticated(false);
+  const [auth, setAuth] = useState<AuthState>({ status: 'checking' });
+  const [preview, setPreview] = useState(false);
+  const [loginMessage, setLoginMessage] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
-  return authenticated ? <Dashboard onLogout={logout} /> : <Login onReview={() => setAuthenticated(true)} />;
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      const resolution = await resolveAuthorizedProfile();
+      if (cancelled) return;
+      setAuth(resolution.ok
+        ? { status: 'authorized', profile: resolution.profile }
+        : { status: 'signedOut' });
+    })();
+
+    const unsubscribe = subscribeToAuthChanges(async (hasSession) => {
+      if (!hasSession) {
+        if (!cancelled) setAuth({ status: 'signedOut' });
+        return;
+      }
+      const resolution = await resolveAuthorizedProfile();
+      if (cancelled) return;
+      setAuth(resolution.ok
+        ? { status: 'authorized', profile: resolution.profile }
+        : { status: 'denied' });
+    });
+
+    return () => { cancelled = true; unsubscribe(); };
+  }, []);
+
+  async function handleSignIn(email: string, password: string) {
+    setSubmitting(true);
+    setLoginMessage(null);
+    try {
+      await signInOperator(email, password);
+      const resolution = await resolveAuthorizedProfile();
+      if (resolution.ok) {
+        setAuth({ status: 'authorized', profile: resolution.profile });
+      } else {
+        setAuth({ status: 'denied' });
+        setLoginMessage('Access denied. Contact your administrator.');
+      }
+    } catch {
+      setAuth({ status: 'signedOut' });
+      setLoginMessage('Invalid credentials. Access denied.');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleLogout() {
+    await signOutOperator().catch(() => undefined);
+    setAuth({ status: 'signedOut' });
+    setPreview(false);
+  }
+
+  if (preview) {
+    return <Dashboard mode="preview" onLogout={() => { setPreview(false); setAuth({ status: 'signedOut' }); }} />;
+  }
+  if (auth.status === 'authorized') {
+    return <Dashboard mode="operator" profile={auth.profile} onLogout={handleLogout} />;
+  }
+  return <Login
+    submitting={submitting}
+    message={loginMessage}
+    onSignIn={handleSignIn}
+    onPreview={() => setPreview(true)}
+  />;
 }

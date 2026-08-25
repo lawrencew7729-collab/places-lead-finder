@@ -4,13 +4,14 @@ import { describe, expect, it } from 'vitest';
 import App from './App';
 
 describe('Phase 1 dashboard foundation', () => {
-  it('shows an authentication gate before the control plane', () => {
+  it('shows an enabled Supabase-auth gate before the control plane', () => {
     render(<App />);
     expect(screen.getByRole('heading', { name: /control dashboard/i })).toBeVisible();
     expect(screen.getByLabelText(/operator email/i)).toBeVisible();
-    expect(screen.getByText(/supabase auth not connected in p0/i)).toBeVisible();
-    expect(screen.getByRole('button', { name: /sign in disabled in p0/i })).toBeDisabled();
-    expect(screen.getByText(/local mock · read-only · no external mutation/i)).toBeVisible();
+    expect(screen.getByRole('button', { name: /^sign in$/i })).toBeEnabled();
+    expect(screen.queryByText(/sign in disabled in p0/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/supabase auth not connected in p0/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/blocked_by_p0_gate/i)).not.toBeInTheDocument();
   });
 
   it('enters review mode and exposes all Phase 1 foundation areas', async () => {
