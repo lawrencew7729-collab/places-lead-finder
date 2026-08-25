@@ -5,3 +5,5 @@ _hma_build/
 .hermes/desktop-attachments/
 _fields.html
 _pricing.html
+node_modules/
+dist/

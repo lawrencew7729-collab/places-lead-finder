@@ -1,0 +1,64 @@
+  :root { --brand: #0ABAB5; --cyan: #22D3EE; }
+  html { color-scheme: dark; }
+  /* pre-paint auth gate: returning users skip login page entirely; strangers never see dashboard flash behind overlay */
+  html.plf-in #login-overlay { display: none !important; }
+  html.plf-out header, html.plf-out main { visibility: hidden; }
+  body { font-family: 'Inter', system-ui, sans-serif; background: #070B14; }
+  .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+
+  body::before {
+    content: ''; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+    background:
+      radial-gradient(55% 45% at 82% -5%, rgba(10,186,181,0.10), transparent 65%),
+      radial-gradient(45% 40% at 8% 105%, rgba(34,211,238,0.07), transparent 60%),
+      linear-gradient(rgba(255,255,255,0.028) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.028) 1px, transparent 1px);
+    background-size: auto, auto, 44px 44px, 44px 44px;
+  }
+  body::after {
+    content: ''; position: fixed; top: 0; left: 0; right: 0; height: 2px; z-index: 50; pointer-events: none;
+    background: linear-gradient(90deg, transparent, rgba(10,186,181,0.8), rgba(34,211,238,0.5), transparent);
+  }
+
+  .glass { background: rgba(255,255,255,0.028); border: 1px solid rgba(255,255,255,0.08); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
+  .glass-strong { background: rgba(11,17,32,0.75); border: 1px solid rgba(255,255,255,0.09); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); }
+  .glow-orange { box-shadow: 0 0 22px rgba(10,186,181,0.35), 0 8px 30px rgba(10,186,181,0.18); }
+  .glow-text { text-shadow: 0 0 18px rgba(10,186,181,0.55); }
+
+  @keyframes fadeInRow { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+  .row-in { animation: fadeInRow .28s ease both; }
+  @keyframes pulseDot { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+  @keyframes spinAnim { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  .login-spin { animation: spinAnim 4s linear infinite; }
+  .login-spin-fast { animation: spinAnim 0.5s linear infinite; }
+  .splash-spin { animation: spinAnim 1.6s linear infinite; }
+  .splash-fade { opacity: 0 !important; transition: opacity .45s ease !important; }
+  .pulse { animation: pulseDot 1.7s ease-in-out infinite; }
+  @keyframes barGlow { 0%,100% { filter: brightness(1); } 50% { filter: brightness(1.25); } }
+  .bar-glow { animation: barGlow 2.4s ease-in-out infinite; }
+
+  input[type="range"] { accent-color: #0ABAB5; }
+  select option { background: #0B1120; color: #e2e8f0; }
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.14); border-radius: 5px; }
+  ::-webkit-scrollbar-track { background: rgba(255,255,255,0.03); }
+  .field {
+    width: 100%; background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.10);
+    border-radius: 0.6rem; padding: 0.65rem 0.9rem; font-size: 0.875rem; color: #e2e8f0;
+    outline: none; transition: border-color .2s, box-shadow .2s;
+  }
+  .field::placeholder { color: rgba(148,163,184,0.5); }
+  .field:focus { border-color: #0ABAB5; box-shadow: 0 0 0 3px rgba(10,186,181,0.15); }
+  .chip {
+    font-size: 11px; padding: 3px 10px; border-radius: 999px;
+    border: 1px solid rgba(10,186,181,0.35); color: #0ABAB5;
+    transition: all .15s; cursor: pointer; background: rgba(10,186,181,0.06);
+  }
+  .chip:hover { background: rgba(10,186,181,0.18); border-color: #0ABAB5; }
+  .chip-dim {
+    font-size: 11px; padding: 3px 10px; border-radius: 999px;
+    border: 1px solid rgba(255,255,255,0.12); color: #94a3b8;
+    transition: all .15s; cursor: pointer; background: rgba(255,255,255,0.03);
+  }
+  .chip-dim:hover { background: rgba(255,255,255,0.08); border-color: rgba(255,255,255,0.25); color: #e2e8f0; }
