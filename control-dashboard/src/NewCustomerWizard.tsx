@@ -18,6 +18,10 @@ interface NewCustomerWizardProps {
 }
 
 const steps = ['Customer identity', 'Google architecture', 'Quota & monitoring', 'Local verification', 'Readiness review'];
+// RETIRED P0-era mock release identity — NOT eligible for real R1 provisioning.
+// The provisioning executor (src/provisioning) refuses this identity
+// (releaseRegistry.verifyGoldenRelease → stale mock refused). Preview/draft
+// records may still reference it for historical display only.
 const GOLDEN_RELEASE = Object.freeze({ releaseId: 'golden-root-626c0c1', gitSha: '626c0c133e7862616ec74bb53ff0ba6f934a9e04', artifactSha256: 'ADAE268878B124A2134DD11ED7CB672E7636DBFA6ADC6B1CE31B752D6F43D2DF' });
 const P0_VERCEL_BINDING = Object.freeze({ projectId: 'vercel-project-p0-mock', deploymentId: 'deployment-p0-mock' });
 

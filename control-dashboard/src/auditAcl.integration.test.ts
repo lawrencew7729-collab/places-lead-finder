@@ -114,7 +114,10 @@ describe('hosted Supabase audit writer ACL correction', () => {
       },
     ]);
     const names = orderedMigrations();
-    expect(names[names.length - 1]).toBe('004_fix_audit_function_acl.sql');
+    // 005 (R1 quota contract alignment) is now the latest migration; the ACL
+    // contract itself was fixed in 004 and remains unchanged.
+    expect(names[names.length - 1]).toBe('005_quota_contract_alignment.sql');
+    expect(names).toContain('004_fix_audit_function_acl.sql');
   }, 30_000);
 
   it('rejects anonymous, public and wrong-role calls before either writer can insert', async () => {
