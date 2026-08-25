@@ -14,6 +14,7 @@ vi.mock('./supabase', () => ({
   signOutOperator: vi.fn(),
   resolveAuthorizedProfile: vi.fn(),
   subscribeToAuthChanges: vi.fn(() => () => undefined),
+  getSupabaseClient: vi.fn(() => null),
 }));
 
 const mockedSignIn = vi.mocked(signInOperator);
@@ -60,15 +61,17 @@ describe('D1 auth remediation — production UI auth flow', () => {
     await userEvent.setup().click(screen.getByRole('button', { name: /^sign in$/i }));
     expect(await screen.findByText(/invalid credentials/i)).toBeVisible();
     expect(screen.getByRole('heading', { name: /control dashboard/i })).toBeVisible();
-    expect(screen.queryByText('Operator Session')).not.toBeInTheDocument();
+    expect(screen.queryByText(/operator session/i)).not.toBeInTheDocument();
   });
 
   it('4. existing session restores authenticated state on startup', async () => {
     mockedResolve.mockResolvedValue({ ok: true, profile: adminProfile });
     render(<App />);
-    expect(await screen.findByText('Operator Session')).toBeVisible();
-    expect(screen.getByText('Test Admin')).toBeVisible();
-    expect(screen.getByText('admin · authenticated')).toBeVisible();
+    expect(await screen.findByText(/operator session/i)).toBeVisible();
+    expect(screen.getByText(/test admin/i)).toBeVisible();
+    expect(screen.getByText(/admin · authenticated/i)).toBeVisible();
+    // default landing after login = Create New Customer (privacy barrier)
+    expect(screen.getByRole('heading', { name: /create new customer/i })).toBeVisible();
   });
 
   it('5. onAuthStateChange SIGNED_IN updates state to authorized', async () => {
@@ -78,7 +81,8 @@ describe('D1 auth remediation — production UI auth flow', () => {
     render(<App />);
     expect(await screen.findByRole('button', { name: /^sign in$/i })).toBeVisible();
     lastListener()(true);
-    expect(await screen.findByText('Operator Session')).toBeVisible();
+    expect(await screen.findByText(/operator session/i)).toBeVisible();
+    expect(screen.getByRole('heading', { name: /create new customer/i })).toBeVisible();
   });
 
   it('6. onAuthStateChange SIGNED_OUT clears authenticated state', async () => {
@@ -86,10 +90,10 @@ describe('D1 auth remediation — production UI auth flow', () => {
       .mockResolvedValueOnce({ ok: true, profile: adminProfile })
       .mockResolvedValueOnce({ ok: false, reason: 'UNAUTHENTICATED' });
     render(<App />);
-    expect(await screen.findByText('Operator Session')).toBeVisible();
+    expect(await screen.findByText(/operator session/i)).toBeVisible();
     lastListener()(false);
     expect(await screen.findByRole('button', { name: /^sign in$/i })).toBeVisible();
-    expect(screen.queryByText('Operator Session')).not.toBeInTheDocument();
+    expect(screen.queryByText(/operator session/i)).not.toBeInTheDocument();
   });
 
   it('7. missing operator profile fails closed', async () => {
@@ -102,7 +106,7 @@ describe('D1 auth remediation — production UI auth flow', () => {
     await userEvent.setup().type(screen.getByLabelText(/password/i), 'whatever');
     await userEvent.setup().click(screen.getByRole('button', { name: /^sign in$/i }));
     expect(await screen.findByText(/access denied/i)).toBeVisible();
-    expect(screen.queryByText('Operator Session')).not.toBeInTheDocument();
+    expect(screen.queryByText(/operator session/i)).not.toBeInTheDocument();
   });
 
   it('8. inactive operator fails closed', async () => {
@@ -115,7 +119,7 @@ describe('D1 auth remediation — production UI auth flow', () => {
     await userEvent.setup().type(screen.getByLabelText(/password/i), 'whatever');
     await userEvent.setup().click(screen.getByRole('button', { name: /^sign in$/i }));
     expect(await screen.findByText(/access denied/i)).toBeVisible();
-    expect(screen.queryByText('Operator Session')).not.toBeInTheDocument();
+    expect(screen.queryByText(/operator session/i)).not.toBeInTheDocument();
   });
 
   it('9. unauthorized role fails closed', async () => {
@@ -128,7 +132,7 @@ describe('D1 auth remediation — production UI auth flow', () => {
     await userEvent.setup().type(screen.getByLabelText(/password/i), 'whatever');
     await userEvent.setup().click(screen.getByRole('button', { name: /^sign in$/i }));
     expect(await screen.findByText(/access denied/i)).toBeVisible();
-    expect(screen.queryByText('Operator Session')).not.toBeInTheDocument();
+    expect(screen.queryByText(/operator session/i)).not.toBeInTheDocument();
   });
 
   it('10. no P0 disabled-login strings remain in production UI', async () => {
@@ -150,5 +154,49 @@ describe('D1 auth remediation — production UI auth flow', () => {
     expect(screen.getByText(/preview session/i)).toBeVisible();
     expect(screen.getByText(/sample data only/i)).toBeVisible();
     expect(screen.queryByText(/authenticated/i)).not.toBeInTheDocument();
+  });
+});
+
+describe('PRE-R1 operator UX — landing, internal gate and production data isolation', () => {
+  it('1. login lands on Create New Customer as the default first page', async () => {
+    mockedResolve.mockResolvedValue({ ok: true, profile: adminProfile });
+    render(<App />);
+    expect(await screen.findByRole('heading', { name: /create new customer/i })).toBeVisible();
+    expect(screen.queryByRole('button', { name: /^overview$/i })).not.toBeInTheDocument();
+  });
+
+  it('2. INTERNAL dashboard control is visible to admin only', async () => {
+    mockedResolve.mockResolvedValue({ ok: true, profile: adminProfile });
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole('heading', { name: /create new customer/i });
+    expect(screen.getByRole('button', { name: /INTERNAL ADMIN/i })).toBeVisible();
+    await user.click(screen.getByRole('button', { name: /INTERNAL ADMIN/i }));
+    expect(await screen.findByRole('button', { name: /^overview$/i })).toBeVisible();
+    // clear return path to Create New Customer
+    expect(screen.getByRole('button', { name: /back to create customer/i })).toBeVisible();
+  });
+
+  it('3. normal operator cannot access Internal pages', async () => {
+    mockedResolve.mockResolvedValue({ ok: true, profile: operatorProfile });
+    render(<App />);
+    await screen.findByRole('heading', { name: /create new customer/i });
+    expect(screen.queryByRole('button', { name: /INTERNAL ADMIN/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^overview$/i })).not.toBeInTheDocument();
+  });
+
+  it('14. production mode never shows sample customers', async () => {
+    mockedResolve.mockResolvedValue({ ok: true, profile: adminProfile });
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole('heading', { name: /create new customer/i });
+    expect(screen.queryByText(/northstar supplies/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/meridian industrial/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/atlas commerce/i)).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /INTERNAL ADMIN/i }));
+    await user.click(await screen.findByRole('button', { name: /^customers$/i }));
+    // no real Control Plane rows (mock client returns null → empty) → empty state, never sample data
+    expect(await screen.findByText(/no real customers yet/i)).toBeVisible();
+    expect(screen.queryByText(/northstar supplies/i)).not.toBeInTheDocument();
   });
 });
