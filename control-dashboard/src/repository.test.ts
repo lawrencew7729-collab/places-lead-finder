@@ -35,7 +35,7 @@ function checkpointInput(tenantId = tenantA): OnboardingCheckpointInput {
     vercelBinding: { projectId: 'vercel-project-p0-mock', deploymentId: 'deployment-p0-mock' },
     infrastructureBinding: { status: 'unknown', evidenceVersion: 'p0-local-unknown-v1' },
     wizardState,
-    readinessState: { ready: false, reasons: ['MOCK_NON_AUTHORITATIVE', 'BLOCKED_BY_P0_GATE'] },
+    readinessState: { ready: false, reasons: ['MOCK_NON_AUTHORITATIVE', 'CUSTOMER_PROVISIONING_NOT_AUTHORIZED'] },
   };
 }
 

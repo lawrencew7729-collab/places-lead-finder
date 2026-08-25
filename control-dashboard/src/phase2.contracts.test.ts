@@ -38,7 +38,7 @@ function completeCheckpoint(tenantId: string, companyName: string, hostname: str
     vercelBinding: { projectId: 'vercel-project-a', deploymentId: 'deployment-a' },
     infrastructureBinding: { status: 'unknown', evidenceVersion: 'p0-local-unknown-v1' },
     wizardState: { ...createWizardState(tenantId), currentStep: 7 },
-    readinessState: { ready: false, reasons: ['MOCK_NON_AUTHORITATIVE', 'BLOCKED_BY_P0_GATE'] },
+    readinessState: { ready: false, reasons: ['MOCK_NON_AUTHORITATIVE', 'CUSTOMER_PROVISIONING_NOT_AUTHORIZED'] },
   };
 }
 
@@ -102,7 +102,7 @@ describe('22-step resumable workflow', () => {
     const atFinal = { ...state, currentStep: 21, completedSteps: [...Array(21)].map((_, i) => i), status: 'in_progress' as const, ownerThresholds: { amberPercent: 70, redPercent: 90 } };
     const blockedLive = transitionWizard(atFinal, 21, { outcome: 'pass', at: '2026-08-24T00:06:00.000Z', liveConfirmedBy: admin.id });
     expect(blockedLive.status).toBe('blocked');
-    expect(blockedLive.blockReason).toBe('BLOCKED_BY_P0_GATE');
+    expect(blockedLive.blockReason).toBe('CUSTOMER_PROVISIONING_NOT_AUTHORIZED');
   });
 });
 

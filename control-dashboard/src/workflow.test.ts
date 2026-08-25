@@ -27,11 +27,11 @@ describe('approved 0–21 wizard state machine', () => {
   });
 
 
-  it.each(['pass', 'fail', 'warning', 'unknown'] as WizardOutcome[])('keeps every P0 step 21 %s attempt fixed BLOCKED_BY_P0_GATE and never LIVE', (outcome) => {
+  it.each(['pass', 'fail', 'warning', 'unknown'] as WizardOutcome[])('keeps every P0 step 21 %s attempt fixed CUSTOMER_PROVISIONING_NOT_AUTHORIZED and never LIVE', (outcome) => {
     const state = { ...configureOwnerThresholds(createWizardState(tenantId), 70, 90), currentStep: 21, completedSteps: Array.from({ length: 21 }, (_, index) => index) };
     const result = transitionWizard(state, 21, { outcome, at, liveConfirmedBy: 'op-admin' });
     expect(result.status).toBe('blocked');
-    expect(result.blockReason).toBe('BLOCKED_BY_P0_GATE');
+    expect(result.blockReason).toBe('CUSTOMER_PROVISIONING_NOT_AUTHORIZED');
     expect(result.evidence[21]?.outcome).toBe(outcome);
   });
 

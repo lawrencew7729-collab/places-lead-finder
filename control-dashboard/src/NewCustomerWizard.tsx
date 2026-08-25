@@ -114,7 +114,7 @@ export function NewCustomerWizard({ gateway, operator, onClose, onSaveDraft, rep
         quotaPolicy: { monthlyTarget: 1000, amberPercent: Number(amberPercent), redPercent: Number(redPercent), status: 'owner_configured' },
         releaseIdentity: GOLDEN_RELEASE, vercelBinding: P0_VERCEL_BINDING, wizardState: workflow,
         infrastructureBinding: { status: 'unknown', evidenceVersion: 'p0-local-unknown-v1' },
-        readinessState: { ready: false, reasons: ['MOCK_NON_AUTHORITATIVE', 'BLOCKED_BY_P0_GATE'] },
+        readinessState: { ready: false, reasons: ['MOCK_NON_AUTHORITATIVE', 'CUSTOMER_PROVISIONING_NOT_AUTHORIZED'] },
       });
       onSaveDraft(saved);
     } catch (error) {
@@ -173,7 +173,7 @@ export function NewCustomerWizard({ gateway, operator, onClose, onSaveDraft, rep
 
         {step === 4 && <section className="wizard-section"><span className="eyebrow">STEP 5 · READINESS ONLY</span><h2>Draft ready for gated review</h2><div className="review-summary"><div><small>CUSTOMER</small><strong>{companyName}</strong><span>{exactSubdomain}</span></div><div><small>GOOGLE PROJECT</small><strong>{googleProjectId}</strong><span>Browser-direct metadata · MOCK UNKNOWN</span></div><div><small>QUOTA POLICY</small><strong>1,000 requests</strong><span>AMBER {amberPercent}% · RED {redPercent}%</span></div><div><small>MONITORING</small><strong>{monitoringMode === 'shared_access' ? 'Shared Monitoring Access' : 'Dedicated Credential'}</strong><span>Phase 2 on-demand verification · not a continuous scheduler</span></div><div><small>RELEASE</small><strong>{GOLDEN_RELEASE.releaseId}</strong><span>No deployment created</span></div></div>
           <div className="gate-grid"><span>Gate S0 · BLOCKED</span><span>Gate S1 · BLOCKED</span><span>Gate C1 · BLOCKED</span><span>Gate T1 · BLOCKED</span><span>Gate D1 · BLOCKED</span><span>Gate R1 · BLOCKED</span></div>
-          <div className="notice compact-notice"><ShieldCheck/><div><strong>BLOCKED_BY_P0_GATE</strong><span>Saving creates an audited in-memory draft and stops at step 5 because real Google project verification is not authorized. Step 20 rejects MOCK as non-authoritative; step 21 cannot create LIVE.</span></div></div>
+          <div className="notice compact-notice"><ShieldCheck/><div><strong>CUSTOMER_PROVISIONING_NOT_AUTHORIZED</strong><span>Saving creates an audited in-memory draft and stops at step 5 because real Google project verification is not authorized. Step 20 rejects MOCK as non-authoritative; step 21 cannot create LIVE.</span></div></div>
         </section>}
       </div>
 

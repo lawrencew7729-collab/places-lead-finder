@@ -46,7 +46,7 @@ describe('Phase 2 New Customer Wizard — local mock boundary', () => {
       keyFingerprint: expect.objectContaining({ algorithm: 'sha256', computedBy: 'mock_provider_adapter' }),
       quotaPolicy: { monthlyTarget: 1000, amberPercent: 70, redPercent: 90, status: 'owner_configured' },
       releaseIdentity: expect.objectContaining({ releaseId: 'golden-root-626c0c1', gitSha: expect.stringMatching(/^[0-9a-f]{40}$/), artifactSha256: expect.stringMatching(/^[A-F0-9]{64}$/) }),
-      readinessState: { ready: false, reasons: expect.arrayContaining(['MOCK_NON_AUTHORITATIVE', 'BLOCKED_BY_P0_GATE']) },
+      readinessState: { ready: false, reasons: expect.arrayContaining(['MOCK_NON_AUTHORITATIVE', 'CUSTOMER_PROVISIONING_NOT_AUTHORIZED']) },
     })));
     expect(repository.exportRedacted().audits).toHaveLength(1);
     expect(repository.exportRedacted().checkpoints[0].wizardState.currentStep).toBe(5);

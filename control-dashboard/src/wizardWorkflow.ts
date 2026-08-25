@@ -62,7 +62,7 @@ export function transitionWizard(state: WizardState, step: number, evidence: Ste
   const at = requireTimestamp(evidence.at);
   if (step === 21) {
     const diagnosticReason = evidence.diagnosticReason ?? (evidence.outcome === 'pass' ? 'P0 activation is not authorized' : `Underlying readiness outcome: ${evidence.outcome.toUpperCase()}`);
-    return { ...state, status: 'blocked', blockReason: 'BLOCKED_BY_P0_GATE', evidence: { ...state.evidence, [step]: { ...evidence, diagnosticReason, at } } };
+    return { ...state, status: 'blocked', blockReason: 'CUSTOMER_PROVISIONING_NOT_AUTHORIZED', evidence: { ...state.evidence, [step]: { ...evidence, diagnosticReason, at } } };
   }
   if (step === 20) {
     if (!state.ownerThresholds) throw new Error('Owner-configured AMBER/RED thresholds required before activation review');
