@@ -2,7 +2,8 @@
 // Queries Google Cloud Monitoring for the real Places API (New) request count
 // this calendar month, using a service account (Monitoring Viewer).
 // Env var: SERVICE_ACCOUNT_JSON = the full service-account JSON key.
-const crypto = require('crypto');
+// ESM format (matches root package.json "type": "module" and api/device.js).
+import crypto from 'node:crypto';
 
 const SCOPE = 'https://www.googleapis.com/auth/monitoring.read';
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
@@ -64,7 +65,7 @@ async function getPlacesUsage(token, projectId) {
   return Math.round(total);
 }
 
-module.exports = async function handler(req, res) {
+export default async function handler(req, res) {
   res.setHeader('Cache-Control', 'no-store');
   const saJson = process.env.SERVICE_ACCOUNT_JSON;
   if (!saJson) {
