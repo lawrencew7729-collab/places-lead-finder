@@ -202,6 +202,12 @@ export function createDeviceLockAdapter(options: VercelAdapterOptions): import('
 export interface ControlPlaneAdapterOptions {
   baseUrl: string; // https://<ref>.supabase.co
   serviceRoleKey: string; // server-side only
+  /**
+   * Real `auth.users` id of the operator performing the write. The live
+   * schema requires `created_by`/`approved_by` to reference a REAL user
+   * (FK to auth.users) — the zero-UUID placeholder is not accepted.
+   */
+  operatorUserId: string;
   transport?: Transport;
 }
 
@@ -253,13 +259,26 @@ export function createControlPlaneAdapter(options: ControlPlaneAdapterOptions): 
     },
 
     async insertRelease(identity) {
-      const res = await transport(`${api}/releases`, { method: 'POST', headers, body: JSON.stringify({
+      // LIVE-SCHEMA mapping (migration 001 `releases`): there is NO `tag`
+      // column. The tag is immutable provenance and is carried in the
+      // NOT-NULL `artifact_uri` as `tag:<tag>`. `status` uses the live
+      // `release_status` enum ('candidate' | 'approved' | ...). An approved
+      // release additionally requires `approved_by` + `approved_at`
+      // (schema CHECK), and `created_by`/`approved_by` must reference a
+      // REAL auth.users id (FK). Raw values stay server-side only.
+      const body: Record<string, string> = {
         version: identity.version,
-        tag: identity.tag,
+        status: identity.status,
         git_sha: identity.commitSha,
         artifact_sha256: identity.artifactSha256,
-        status: identity.status,
-      }) });
+        artifact_uri: `tag:${identity.tag}`,
+        created_by: options.operatorUserId,
+      };
+      if (identity.status === 'approved') {
+        body.approved_by = identity.approvedBy ?? options.operatorUserId;
+        body.approved_at = identity.approvedAt ?? new Date().toISOString();
+      }
+      const res = await transport(`${api}/releases`, { method: 'POST', headers, body: JSON.stringify(body) });
       if (!res.ok) return { ok: false, reason: `cp insertRelease ${res.status}` };
       return { ok: true, resourceId: identity.tag };
     },

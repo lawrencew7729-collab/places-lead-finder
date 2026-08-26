@@ -20,6 +20,7 @@ export interface GoldenReleaseIdentity {
   status: 'candidate' | 'approved';
   createdAt?: string;
   approvedBy?: string;
+  approvedAt?: string;
 }
 
 /** The stale P0 mock — explicitly ineligible for real provisioning. */

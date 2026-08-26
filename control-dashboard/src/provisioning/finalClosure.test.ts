@@ -147,7 +147,7 @@ describe('R1 final closure — real server-side adapters', () => {
 
   it('Control Plane adapter writes explicit quota contract (never defaults)', async () => {
     const { transport, calls } = createFakeTransport([{ urlPrefix: '/customer_configurations', body: {} }]);
-    const adapter = createControlPlaneAdapter({ baseUrl: 'https://x.supabase.co', serviceRoleKey: 'k', transport });
+    const adapter = createControlPlaneAdapter({ baseUrl: 'https://x.supabase.co', serviceRoleKey: 'k', operatorUserId: 'op-user-1', transport });
     const res = await adapter.insertCustomerConfig({
       tenantId: 't1',
       googleProjectId: 'p1',
@@ -173,6 +173,34 @@ describe('R1 final closure — real server-side adapters', () => {
     expect(body.quota_enforcement_mode).toBe('disable_new_search');
     expect(body.places_key_fingerprint).toBe(FP);
     expect(calls[0].body).not.toContain('AIza');
+  });
+
+  it('Control Plane adapter maps release identity to the LIVE releases schema (no tag column)', async () => {
+    const { transport, calls } = createFakeTransport([{ urlPrefix: '/releases', body: [{}] }]);
+    const adapter = createControlPlaneAdapter({ baseUrl: 'https://x.supabase.co', serviceRoleKey: 'k', operatorUserId: 'op-user-1', transport });
+    const identity: GoldenReleaseIdentity = {
+      version: '1.0.2',
+      tag: 'customer-app-v1.0.2',
+      commitSha: 'c'.repeat(40),
+      artifactSha256: 'd'.repeat(64),
+      sourcePath: 'repo root (Vite)',
+      status: 'approved',
+      approvedBy: 'op-user-1',
+      approvedAt: '2026-08-26T00:00:00.000Z',
+    };
+    const res = await adapter.insertRelease(identity);
+    expect(res.ok).toBe(true);
+    const body = JSON.parse(calls[0].body ?? '{}');
+    // live releases columns only — the invented `tag` column must NOT be sent
+    expect(Object.keys(body).sort()).toEqual(['approved_at', 'approved_by', 'artifact_sha256', 'artifact_uri', 'created_by', 'git_sha', 'status', 'version']);
+    expect(body.tag).toBeUndefined();
+    expect(body.artifact_uri).toBe('tag:customer-app-v1.0.2'); // NOT-NULL provenance carrier
+    expect(body.git_sha).toBe('c'.repeat(40));
+    expect(body.artifact_sha256).toBe('d'.repeat(64));
+    expect(body.status).toBe('approved');
+    expect(body.created_by).toBe('op-user-1');
+    expect(body.approved_by).toBe('op-user-1');
+    expect(body.approved_at).toBe('2026-08-26T00:00:00.000Z');
   });
 
   it('Google adapter adds ONLY monitoring.viewer — pre-existing roles preserved, none granted', async () => {
