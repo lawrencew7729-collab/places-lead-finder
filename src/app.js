@@ -29,9 +29,8 @@ let advanced = false;
 let curKw = '', curRegion = 'my', curMobile = false;
 let fetched = 0, dup = 0, closed = 0, nonmobile = 0, outRange = 0, req = 0;
 
-/* ================= access gate (client-side — deters casual use, NOT real security) ================= */
-const APP_USER = 'Lawrence';
-const APP_PASS = '9999'; /* change this to your own password */
+/* ================= access gate (server-enforced — password validated by /api/device
+   against server-side APP_PASS env; NO credentials live in this bundle) ================= */
 
 /* ===== device lock (server-enforced — 1 account = max 2 devices, e.g. phone + computer) ===== */
 function getDeviceId() {
@@ -86,13 +85,7 @@ function showLogin(reason) {
 }
 
 async function doLogin() {
-  const u = document.getElementById('login-user').value.trim();
   const p = document.getElementById('login-pass').value;
-  if (u !== APP_USER || p !== APP_PASS) {
-    document.getElementById('login-err').textContent = '✖ INVALID CREDENTIALS';
-    document.getElementById('login-err').classList.remove('hidden');
-    return;
-  }
   const logo = document.querySelector('#login-overlay .login-spin');
   const btn = document.querySelector('#login-overlay button');
   if (logo) logo.classList.replace('login-spin', 'login-spin-fast');
@@ -115,8 +108,11 @@ async function doLogin() {
       document.getElementById('login-err').classList.remove('hidden');
     }
   } catch (e) {
-    /* network fail — fall back to local auth so the app still opens */
-    setTimeout(enterApp, 400);
+    /* server unreachable — stay locked (fail-closed). NO auto-enter: the only
+       auth path is the server-side register check, which never ran. */
+    if (btn) btn.textContent = 'UNLOCK ▶';
+    document.getElementById('login-err').textContent = '✖ SERVER UNREACHABLE — TRY AGAIN';
+    document.getElementById('login-err').classList.remove('hidden');
   }
 }
 let plfAuthed = false;

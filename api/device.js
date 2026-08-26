@@ -1,29 +1,53 @@
 /* ============================================================
-   Lead Finder — Device Lock API
+   Lead Finder — Device Lock API (R1 TWO-DEVICE CONTRACT, v1.0.2)
    一个账号最多绑定 2 台设备（hard lock）。
    老板意图：客户买一个 account 只许手机+电脑两台用，防跟同行共享。
 
-   Storage : Vercel KV (Upstash Redis REST)
+   Identity : CUSTOMER_TENANT_ID（immutable UUID，server env）
+     registry key = lf_dev:<CUSTOMER_TENANT_ID>
+     tenantId 缺失 → FAIL CLOSED（not_configured）。
+     hostname 不再是身份（可 rebind/redeploy 会重置身份）。
+     Legacy 部署（无此 env）保留旧版行为，不在本合约范围。
+
+   Storage : 每个客户独立 dedicated KV store（Vercel KV / Upstash REST）
      env KV_REST_API_URL / KV_REST_API_TOKEN（新版 Vercel KV 自动注入）
      或 UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN（旧命名，兼容）
+     KV 缺失 → FAIL CLOSED（不降级 open mode）。
 
-   卖家管理 :
-     env DEVICE_ADMIN_SECRET  — reset / remove 的钥匙（客户换机/清缓存被锁时解锁用）
-     env APP_PASS             — 部署密码，server 端兜底校验（防 F12 改前端绕过）
+   Auth : env APP_PASS — customer access code（16-char，server 端校验）
+     缺失 → register FAIL CLOSED。永不进 browser bundle / Git。
 
-   Fallback : 未配置 KV → open mode（不锁，保持原行为，兼容客户版未配 KV 的部署）
+   Recovery : 无公开 reset/remove endpoint。device slot 释放 =
+     OWNER-CONTROLLED ISOLATED MAINTENANCE —— 直接在 THAT customer 的
+     dedicated KV store 上操作（删除/编辑 lf_dev:<tenantId> 记录）。
+     无 central shared reset secret。无 browser-accessible admin 机制。
 
-   Key 隔离 : lf_dev:<host> — 每个部署（subdomain）独立，客户之间互不影响
+   No automatic eviction : registry 无 TTL；slot 只由 owner 显式释放。
+
+   Probe (provisioning readiness) : mode=probe 返回布尔型锁定状态
+     （locked/open/unconfigured · maxDevices · kvConfigured ·
+     appPassConfigured · tenantIdConfigured）— 不含任何 secret 值，
+     供 provisioning executor 在 CUSTOMER READY 前验证。
    ============================================================ */
 
 const MAX_DEVICES = 2;          // 一账号 2 台设备
-const TTL = 90 * 24 * 60 * 60;  // 90 天未活跃自动释放名额
 
 function kv() {
   const url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
   const token = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!url || !token) return null;
   return { url, token };
+}
+
+/** Immutable registry identity. Missing tenant id → fail closed. */
+function accountKey() {
+  const tid = process.env.CUSTOMER_TENANT_ID;
+  if (!tid) return null;
+  return 'lf_dev:' + tid;
+}
+
+function notConfigured(res) {
+  return res.json({ allowed: false, reason: 'not_configured' });
 }
 
 async function kvGet(key) {
@@ -40,17 +64,14 @@ async function kvGet(key) {
 async function kvSet(key, value) {
   const c = kv();
   if (!c) return;
-  const r = await fetch(`${c.url}/set/${encodeURIComponent(key)}?EX=${TTL}`, {
+  // No TTL: registry persists until an explicit owner/admin release (no automatic eviction).
+  const r = await fetch(`${c.url}/set/${encodeURIComponent(key)}`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${c.token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(value),
   });
   const j = await r.json();
   if (j.error) throw new Error(`kv set: ${j.error}`);
-}
-
-function accountKey(req) {
-  return 'lf_dev:' + (req.headers['x-forwarded-host'] || req.headers.host || 'default');
 }
 
 function labelFromUA(ua = '') {
@@ -70,7 +91,7 @@ function labelFromUA(ua = '') {
 }
 
 async function handleCheck(req, res, key, id) {
-  if (!kv()) return res.json({ allowed: true, mode: 'open' });
+  if (!key || !kv()) return notConfigured(res);
   const rec = await kvGet(key);
   const devs = rec && Array.isArray(rec.devices) ? rec.devices : [];
   const known = devs.find((d) => d.id === id);
@@ -84,11 +105,13 @@ async function handleCheck(req, res, key, id) {
 
 async function handleRegister(req, res, key, id) {
   if (!id) return res.status(400).json({ error: 'missing device id' });
+  if (!key) return notConfigured(res);
   const expected = process.env.APP_PASS;
-  if (expected && (!req.body || req.body.pass !== expected)) {
+  if (!expected) return notConfigured(res); // fail closed: no access code configured
+  if (!req.body || req.body.pass !== expected) {
     return res.json({ allowed: false, reason: 'invalid' });
   }
-  if (!kv()) return res.json({ allowed: true, mode: 'open' });
+  if (!kv()) return notConfigured(res); // fail closed: no dedicated store configured
   const rec = (await kvGet(key)) || { devices: [] };
   if (!Array.isArray(rec.devices)) rec.devices = [];
   const devs = rec.devices;
@@ -116,54 +139,26 @@ async function handleRegister(req, res, key, id) {
   return res.json({ allowed: true, devices: devs.length, max: MAX_DEVICES });
 }
 
-function isAdmin(req) {
-  const secret = process.env.DEVICE_ADMIN_SECRET;
-  if (!secret) return false;
-  return !!(req.query && req.query.admin === secret);
-}
-
-async function handleReset(req, res, key) {
-  if (!isAdmin(req)) return res.status(403).json({ error: 'forbidden' });
-  await kvSet(key, { devices: [] });
-  return res.json({ ok: true, cleared: true });
-}
-
-async function handleRemove(req, res, key) {
-  if (!isAdmin(req)) return res.status(403).json({ error: 'forbidden' });
-  const id = req.query.id;
-  if (!id) return res.status(400).json({ error: 'missing id' });
-  const rec = (await kvGet(key)) || { devices: [] };
-  if (!Array.isArray(rec.devices)) rec.devices = [];
-  rec.devices = rec.devices.filter((d) => d.id !== id);
-  await kvSet(key, rec);
-  return res.json({ ok: true, remaining: rec.devices.length });
-}
-
-async function handleList(req, res, key) {
-  if (!isAdmin(req)) return res.status(403).json({ error: 'forbidden' });
-  const rec = (await kvGet(key)) || { devices: [] };
-  if (!Array.isArray(rec.devices)) rec.devices = [];
+async function handleProbe(req, res) {
+  const key = accountKey();
+  const c = kv();
   return res.json({
-    max: MAX_DEVICES,
-    devices: rec.devices.map((d) => ({
-      id: d.id,
-      label: d.label || 'unknown',
-      firstSeen: d.firstSeen || null,
-      lastSeen: d.lastSeen || null,
-    })),
+    mode: !key ? 'unconfigured' : c ? 'locked' : 'open',
+    maxDevices: MAX_DEVICES,
+    kvConfigured: !!c,
+    appPassConfigured: !!process.env.APP_PASS,
+    tenantIdConfigured: !!key,
   });
 }
 
 export default async function handler(req, res) {
-  const key = accountKey(req);
+  const key = accountKey();
   const mode = req.query && req.query.mode;
   try {
     switch (mode) {
       case 'check':      return await handleCheck(req, res, key, req.query.id);
       case 'register':   return await handleRegister(req, res, key, req.query.id);
-      case 'reset':      return await handleReset(req, res, key);
-      case 'remove':     return await handleRemove(req, res, key);
-      case 'list':       return await handleList(req, res, key);
+      case 'probe':      return await handleProbe(req, res);
       default:           return res.status(400).json({ error: 'unknown mode' });
     }
   } catch (err) {
