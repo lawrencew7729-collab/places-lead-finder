@@ -244,19 +244,10 @@ function gridParamsFor(a) {
 }
 
 /* ================= budget UI ================= */
-async function refreshLiveUsage() {
-  // R1 REVISED CONTRACT: called ONLY at top-level RUN SEARCH start —
-  // maximum ONE Shared Monitoring fetch per session; FAIL CLOSED on error.
-  const res = await telemetry.refreshMonitoringBase();
-  liveUsage = res.ok ? res.used : null;
-  updateBudgetUI();
-  return res;
-}
 function currentUsage() {
-  // Live base + session delta when a fresh snapshot exists (enforcement);
-  // otherwise the browser-local monthly estimate (display only — enforcement
-  // is always re-anchored by the RUN-start fetch, never weaker than 950).
-  return telemetry.hasLiveBase() ? telemetry.effectiveUsage() : getUsage();
+  // Server-authoritative shared usage (last claim/RUN response); falls back to
+  // the browser-local estimate only for display before any session exists.
+  return telemetry.hasSession() || liveUsage !== null ? telemetry.effectiveUsage() : getUsage();
 }
 function monthKey() { return new Date().toISOString().slice(0, 7); }
 function getUsage() {
@@ -274,7 +265,7 @@ function updateBudgetUI() {
   const used = currentUsage(), pct = Math.min(100, Math.round(used / quota.monthlyTarget * 100));
   document.getElementById('budget-used').textContent = used.toLocaleString();
   document.getElementById('header-budget').textContent = used.toLocaleString() + '/' + quota.monthlyTarget.toLocaleString();
-  document.getElementById('budget-pct').textContent = pct + '% · SAFETY STOP AT ' + quota.redRequests.toLocaleString();
+  document.getElementById('budget-pct').textContent = pct + '% · SAFETY STOP AT ' + quota.redRequests.toLocaleString() + ' · 50/SEARCH SESSION';
   const now = new Date();
   const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
   const daysLeft = Math.ceil((next - now) / 86400000);
@@ -284,7 +275,7 @@ function updateBudgetUI() {
   bar.style.background = pct >= quota.redPercent ? 'linear-gradient(90deg,#dc2626,#ef4444)' : pct >= quota.amberPercent ? 'linear-gradient(90deg,#f4b942,#fbbf24)' : 'linear-gradient(90deg,#0ABAB5,#67E8F9)';
   const src = document.getElementById('quota-src');
   if (src) {
-    const live = telemetry.hasLiveBase();
+    const live = telemetry.hasSession() || liveUsage !== null;
     src.textContent = live ? '● LIVE SNAPSHOT' : 'APP-LOCAL EST';
     src.className = 'mono text-[10px] font-bold px-2 py-0.5 rounded-md ' + (live ? 'bg-emerald-400/10 border border-emerald-400/30 text-emerald-400' : 'bg-white/5 border border-white/10 text-slate-500');
   }
@@ -337,20 +328,29 @@ function processPlaces(places, a, radiusM, doFilter) {
   return added;
 }
 async function apiFetch(payload) {
-  // R1 REVISED SAFETY CONTRACT: every outbound Places API request attempt is
-  // gated AND accounted BEFORE it is issued (includes pagination, deep search,
-  // retries, and requests that later error). At/after effectiveUsage = 950 no
-  // request may be issued — request #951 is never intentionally attempted.
-  if (!telemetry.canIssueRequest()) {
+  // R1 CENTRALIZED CONTRACT: EVERY outbound Places request attempt must first
+  // win a server-side atomic claim (api/session.js) — lease owned + attempts
+  // < 50 + usage bridge incremented. The Google request is issued ONLY after
+  // the claim succeeds. FAIL CLOSED: no claim -> no request (#51 never issued,
+  // lost lease -> stop, Redis down -> stop).
+  const claim = await telemetry.claimRequest();
+  if (!claim.ok) {
     stopFlag = true;
-    showRunStatus('🛑 SAFETY STOP AT ' + customerQuota().redRequests.toLocaleString() + ' — NO MORE PLACES REQUESTS');
+    const reason = claim.reason;
+    showRunStatus(reason === 'cap'
+      ? '🛑 SESSION LIMIT (50) REACHED — START A NEW RUN'
+      : reason === 'no_session'
+        ? '⏳ SESSION EXPIRED — ANOTHER DEVICE MAY SEARCH — START A NEW RUN'
+        : reason === 'ownership'
+          ? '✖ SESSION OWNERSHIP LOST — START A NEW RUN'
+          : '✖ REQUEST CLAIM FAILED — SEARCH STOPPED (REDIS UNAVAILABLE)');
     return null;
   }
-  telemetry.accountRequest();
+  liveUsage = typeof claim.used === 'number' ? claim.used : liveUsage;
   try {
     return await fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': EMBEDDED_KEY, 'X-Goog-FieldMask': FIELDS }, body: JSON.stringify(payload) });
   } catch (e) {
-    // already accounted (conservative) — surface for caller error handling
+    // already claimed (conservative over-count is acceptable; under-count is not)
     throw e;
   }
 }
@@ -358,12 +358,22 @@ async function apiFetch(payload) {
 async function runSearch() {
   if (!onOfficialDomain) { showRunStatus('✖ SEARCH DISABLED — OPEN THE OFFICIAL URL'); return; }
   const quota = customerQuota();
-  // R1 REVISED SAFETY CONTRACT: one fresh latest-available Monitoring snapshot
-  // per top-level RUN session. FAIL CLOSED: fetch failure or baseline >= 950
-  // blocks the search. localSessionDelta resets to 0 on success.
-  const base = await refreshLiveUsage();
-  if (!base.ok) { showRunStatus('✖ USAGE CHECK FAILED — SEARCH BLOCKED (MONITORING UNAVAILABLE)'); return; }
-  if (base.used >= quota.redRequests) { showRunStatus('🛑 SAFETY STOP AT ' + quota.redRequests.toLocaleString() + ' — NEW SEARCHES DISABLED — EXISTING RESULTS REMAIN AVAILABLE.'); return; }
+  // R1 CENTRALIZED CONTRACT: one Monitoring query max at RUN start; the
+  // server reconciles Monitoring vs tenant Redis bridge (max, never backward),
+  // blocks at >= 950, and atomically acquires the single active-search lease.
+  const start = await telemetry.startRun(getDeviceId());
+  if (!start.ok) {
+    if (start.locked) {
+      showRunStatus('🔒 ANOTHER AUTHORIZED DEVICE IS CURRENTLY SEARCHING. PLEASE CLOSE THE OTHER DEVICE TO CONTINUE.');
+    } else if (start.blocked) {
+      showRunStatus('🛑 SAFETY STOP AT ' + quota.redRequests.toLocaleString() + ' — NEW SEARCHES DISABLED (USED ' + (typeof start.used === 'number' ? start.used.toLocaleString() : '?') + '/' + quota.monthlyTarget.toLocaleString() + ')');
+    } else {
+      showRunStatus('✖ USAGE CHECK FAILED — SEARCH BLOCKED (MONITORING/REDIS UNAVAILABLE)');
+    }
+    return;
+  }
+  liveUsage = start.used;
+  updateBudgetUI();
 
   const kwInput = document.getElementById('grid-kw').value.trim();
   const kws = kwInput.split(',').map(s => s.trim()).filter(Boolean);
@@ -401,7 +411,7 @@ async function runSearch() {
     const a = combo.a, kw = combo.kw;
     let pageToken = null, pages = 0;
     showRunStatus('▸ FIND ' + (ci2 + 1) + '/' + combos.length + ' · ' + kw + ' @ ' + a.name + ' · PASS 1');
-    while (pages < 3 && running && !stopFlag && currentUsage() < customerQuota().redRequests) {
+    while (pages < 3 && running && !stopFlag) {
       const payload = { textQuery: kw + ' in ' + a.name, pageSize: 20, languageCode: 'en', regionCode: curRegion };
       if (pageToken) payload.pageToken = pageToken;
       let resp;
@@ -458,7 +468,6 @@ async function deepSearch() {
   outer:
   for (let i = 0; i < deepPairs.length; i++) {
     if (!running || stopFlag) break outer;
-    if (currentUsage() >= customerQuota().redRequests) { showRunStatus('🛑 SAFETY STOP AT ' + customerQuota().redRequests.toLocaleString() + ' — NO MORE PLACES REQUESTS.'); break outer; }
     const pair = deepPairs[i];
     const a = pair.a, kw = pair.kw;
     const { radiusKm, cellKm } = gridParamsFor(a);
@@ -480,7 +489,7 @@ async function deepSearch() {
     processPlaces(probeData.places, a, radiusM, true);
 
     if (probeData.nextPageToken) {
-      while (probeData.nextPageToken && running && !stopFlag && currentUsage() < customerQuota().redRequests) {
+      while (probeData.nextPageToken && running && !stopFlag) {
         const pagePayload = { textQuery: kw + ' in ' + a.name, pageSize: 20, languageCode: 'en', regionCode: curRegion,
           locationBias: { circle: { center: { latitude: a.lat, longitude: a.lng }, radius: radiusM } }, pageToken: probeData.nextPageToken };
         let r2;
@@ -510,12 +519,11 @@ async function deepSearch() {
     let stale = 0;
     for (let ci = 0; ci < cells.length; ci++) {
       if (!running || stopFlag) break outer;
-      if (currentUsage() >= customerQuota().redRequests) { showRunStatus('🛑 SAFETY STOP AT ' + customerQuota().redRequests.toLocaleString() + ' — NO MORE PLACES REQUESTS.'); break outer; }
       const c = cells[ci];
       let pageToken = null, pageNo = 0;
       showRunStatus('▸ DEEP ' + (i + 1) + '/' + deepPairs.length + ' · ' + a.name + ' · CELL ' + (ci + 1) + '/' + cells.length + ' · ' + fetched + ' FETCHED · ' + rows.length + ' KEPT');
       let cellAdded = 0;
-      while (running && !stopFlag && currentUsage() < customerQuota().redRequests) {
+      while (running && !stopFlag) {
         pageNo++;
         const payload = { textQuery: kw + ' in ' + a.name, pageSize: 20, languageCode: 'en', regionCode: curRegion,
           locationBias: { circle: { center: { latitude: c.lat, longitude: c.lng }, radius: cellKm * 1000 } } };
@@ -563,8 +571,10 @@ function finishSearch(msg) {
     deepBtn: document.getElementById('deep-btn'),
   });
   syncStats();
-  // R1 REVISED CONTRACT: finishSearch must NOT trigger a Monitoring fetch
-  // (DEEP/CONTINUE completion and STOP -> 0 queries).
+  // R1 CENTRALIZED CONTRACT: finishSearch must NOT trigger a Monitoring fetch
+  // (DEEP/CONTINUE completion and STOP -> 0 Monitoring queries). The active
+  // lease is released safely (compare-and-release, not a Monitoring query).
+  telemetry.releaseSession();
   if (!msg.includes('✖') && !msg.includes('CAP')) showRunStatus(msg);
   if (rows.length === 0) document.getElementById('empty-state').classList.remove('hidden');
 }
@@ -582,7 +592,8 @@ function stopSearch() {
     deepBtn: document.getElementById('deep-btn'),
   });
   syncStats();
-  // R1 REVISED CONTRACT: STOP -> 0 Monitoring queries (local accounting only).
+  // R1 CENTRALIZED CONTRACT: STOP -> 0 Monitoring queries. Release the lease.
+  telemetry.releaseSession();
   showRunStatus('■ STOPPED BY USER — ' + rows.length + ' COMPANIES · ' + req + ' REQ · RESULTS PRESERVED — READY FOR A NEW SEARCH');
 }
 
@@ -647,10 +658,17 @@ function clearTable() {
 }
 
 /* ================= init ================= */
-// R1 REVISED CONTRACT: page load / refresh -> 0 Monitoring queries.
-// Display starts from the browser-local estimate; the next RUN SEARCH
-// re-anchors with one fresh snapshot.
+// R1 CENTRALIZED CONTRACT: page load / refresh -> 0 Monitoring queries.
+// A Redis-only status check gives Device-B UX (another device searching ->
+// RUN disabled). No recurring polling.
 updateBudgetUI();
+telemetry.status().then((st) => {
+  if (st.ok && st.active) {
+    const runBtn = document.getElementById('run-btn');
+    if (runBtn) runBtn.disabled = true;
+    showRunStatus('🔒 ANOTHER AUTHORIZED DEVICE IS CURRENTLY SEARCHING. PLEASE CLOSE THE OTHER DEVICE TO CONTINUE.');
+  }
+});
 document.getElementById('grid-kw').addEventListener('input', debounceSuggest);
 debounceSuggest();
 

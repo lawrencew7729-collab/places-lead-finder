@@ -9,10 +9,26 @@
 // Text Search Enterprise / billing-SKU usage.
 // ESM format (matches root package.json "type": "module").
 import { getVercelOidcToken } from '@vercel/oidc';
+import { redisClient, tenantActiveSearchKey, tenantUsageKey, currentMonthUtc } from './redis.js';
+import { SESSION_TTL_SECONDS, MAX_SESSION_REQUESTS } from './session.js';
 
 const MONITORING_SCOPE = 'https://www.googleapis.com/auth/monitoring.read';
 const STS_URL = 'https://sts.googleapis.com/v1/token';
 const MON_URL = 'https://monitoring.googleapis.com/v3/projects/';
+
+export const SAFETY_STOP = 950;
+export const GOOGLE_ALLOWANCE = 1000;
+
+/** Atomic usage-floor reconcile: tenant usage NEVER moves backward vs Monitoring. */
+export const RECONCILE_SCRIPT = `
+local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+local snapshot = tonumber(ARGV[1])
+if current < snapshot then
+  redis.call('SET', KEYS[1], ARGV[1])
+  return snapshot
+end
+return current
+`;
 
 export const DEFAULT_MONITORING_SA = 'leadfinder-usage-monitor@leadfinder-shared-monitoring.iam.gserviceaccount.com';
 
@@ -88,6 +104,10 @@ export function createUsageHandler(deps = {}) {
     monitoringSa,
     wifAudience,
     monthlyTarget,
+    redis = redisClient(),
+    tenantId = process.env.CUSTOMER_TENANT_ID || '',
+    now = () => new Date(),
+    randomUuid = () => crypto.randomUUID(),
   } = deps;
 
   return async function handler(req, res) {
@@ -97,8 +117,12 @@ export function createUsageHandler(deps = {}) {
     const audience = wifAudience || process.env.WIF_AUDIENCE || '';
     const cap = getMonthlyTarget(monthlyTarget);
     const projectId = process.env.CUSTOMER_GOOGLE_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT_ID || '';
-    if (!audience || !projectId) {
+    if (!audience || !projectId || !tenantId) {
       return res.status(503).json({ error: 'not_configured', used: null, cap });
+    }
+    if (!redis.configured()) {
+      // FAIL CLOSED: no Redis bridge/lease — RUN must not start.
+      return res.status(503).json({ error: 'redis_unavailable', used: null, cap });
     }
     let oidcToken;
     try {
@@ -110,9 +134,45 @@ export function createUsageHandler(deps = {}) {
       return res.status(503).json({ error: 'not_configured', used: null, cap });
     }
     try {
+      // 1. ONE latest-available Google Monitoring snapshot (broad Places count).
       const token = await exchangeForSaToken(oidcToken, audience, sa, fetchImpl);
-      const used = await getPlacesUsage(token, projectId, fetchImpl);
-      res.json({ used, cap, month: new Date().toISOString().slice(0, 7), source: 'monitoring' });
+      const monitoringUsed = await getPlacesUsage(token, projectId, fetchImpl);
+      // 2. tenant Redis usage bridge (covers Monitoring propagation delay).
+      const month = currentMonthUtc(now());
+      const usageKey = tenantUsageKey(tenantId, month);
+      const leaseKey = tenantActiveSearchKey(tenantId);
+      // 3. atomic reconcile floor — usage can NEVER move backward.
+      const reconciled = await redis.eval(RECONCILE_SCRIPT, [usageKey], [String(monitoringUsed)]);
+      const effectiveStart = Math.max(monitoringUsed, Number(reconciled ?? monitoringUsed));
+      // 4. SAFETY STOP: 950 blocks NEW top-level RUN.
+      if (effectiveStart >= SAFETY_STOP) {
+        return res.json({ used: effectiveStart, cap, safetyStop: SAFETY_STOP, month, blocked: true });
+      }
+      // 5. atomic exclusive lease acquire (NX).
+      const sessionId = randomUuid();
+      const lease = JSON.stringify({
+        sessionId,
+        deviceId: req.query && req.query.deviceId ? String(req.query.deviceId) : 'unknown',
+        attempts: 0,
+        acquiredAt: Date.now(),
+      });
+      const acquired = await redis.set(leaseKey, lease, 'EX', String(SESSION_TTL_SECONDS), 'NX');
+      if (acquired !== 'OK') {
+        // 6. another device holds an active search lease.
+        return res.json({ used: effectiveStart, cap, safetyStop: SAFETY_STOP, month, locked: true });
+      }
+      // 7. return session context (server-side attempt count starts at 0).
+      return res.json({
+        used: effectiveStart,
+        cap,
+        safetyStop: SAFETY_STOP,
+        month,
+        sessionId,
+        maxSessionRequests: MAX_SESSION_REQUESTS,
+        leaseTtlSeconds: SESSION_TTL_SECONDS,
+        expiresAt: new Date(Date.now() + SESSION_TTL_SECONDS * 1000).toISOString(),
+        source: 'monitoring',
+      });
     } catch (e) {
       res.status(500).json({ error: String((e && e.message) || e), used: null, cap });
     }

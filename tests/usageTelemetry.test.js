@@ -1,160 +1,141 @@
-import { describe, expect, it, vi } from 'vitest';
-import { createUsageTelemetry } from '../src/usageTelemetry.js';
+import { describe, expect, it } from 'vitest';
+import { createUsageTelemetry, SESSION_CONTRACT } from '../src/usageTelemetry.js';
 
-/** Fake fetch that records every call and returns a scripted /api/usage body. */
-function fakeFetch(scripted) {
+/** Fake same-origin fetch recording calls and scripting /api/usage + /api/session. */
+function fakeFetch(script) {
   const calls = [];
   const impl = async (url, init) => {
-    calls.push({ url, init });
-    if (scripted && scripted.throwOnce && calls.length === 1) throw new Error(scripted.throwOnce);
-    if (scripted && scripted.failOnce && calls.length === 1) return { ok: false, status: 503 };
-    return {
-      ok: true,
-      status: 200,
-      json: async () => ({ used: scripted.used, cap: scripted.cap ?? 1000, source: 'monitoring' }),
-    };
+    const u = String(url);
+    calls.push({ url: u, method: (init && init.method) || 'GET' });
+    if (u.includes('/api/usage')) {
+      if (script.usageFailOnce && calls.filter((c) => c.url.includes('/api/usage')).length === 1) {
+        return { ok: false, status: 503, json: async () => ({ error: 'x' }) };
+      }
+      return { ok: true, status: 200, json: async () => script.usageResponse };
+    }
+    if (u.includes('mode=claim')) {
+      const c = calls.filter((x) => x.url.includes('mode=claim')).length;
+      if (script.claimFailAfter && c > script.claimFailAfter) {
+        return { ok: false, status: 409, json: async () => ({ ok: false, reason: script.claimFailReason || 'cap' }) };
+      }
+      if (script.claimFails) return { ok: false, status: 409, json: async () => ({ ok: false, reason: 'claim_failed' }) };
+      return { ok: true, status: 200, json: async () => ({ ok: true, attempts: c, used: script.usageResponse.used + c }) };
+    }
+    if (u.includes('mode=release')) {
+      return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    }
+    if (u.includes('mode=status')) {
+      return { ok: true, status: 200, json: async () => ({ active: script.statusActive || false, sessionId: script.statusActive ? 'sess-other' : null, used: 0 }) };
+    }
+    return { ok: true, status: 200, json: async () => ({}) };
   };
   return { impl, calls };
 }
 
-const QUOTA = { monthlyTarget: 1000, redRequests: 950 };
+const OK_START = { used: 100, cap: 1000, safetyStop: 950, sessionId: 'sess-1', maxSessionRequests: 50, expiresAt: '2026-08-26T00:00:00.000Z' };
 
-describe('R1 REVISED SAFETY CONTRACT — event-driven telemetry', () => {
-  it('RUN -> DEEP -> DEEP -> STOP = exactly ONE Monitoring fetch', async () => {
-    const { impl, calls } = fakeFetch({ used: 100 });
+describe('R1 CENTRALIZED — telemetry UX layer (server is the authority)', () => {
+  it('RUN start: exactly ONE /api/usage call; session context returned', async () => {
+    const { impl, calls } = fakeFetch({ usageResponse: OK_START });
     const t = createUsageTelemetry({ fetchImpl: impl });
-    t.setQuota(QUOTA);
-    // RUN start: one fetch
-    const base = await t.refreshMonitoringBase();
-    expect(base.ok).toBe(true);
-    expect(base.used).toBe(100);
-    expect(calls.length).toBe(1);
-    // simulate DEEP -> DEEP -> STOP session with local accounting only
-    t.accountRequest(); t.accountRequest(); t.accountRequest(); // deep requests
-    expect(calls.length).toBe(1); // still exactly one fetch
-    expect(t.effectiveUsage()).toBe(103);
+    const start = await t.startRun('dev-A');
+    expect(start.ok).toBe(true);
+    expect(start.sessionId).toBe('sess-1');
+    expect(start.used).toBe(100);
+    expect(calls.filter((c) => c.url.includes('/api/usage')).length).toBe(1);
   });
 
-  it('refresh without RUN = 0 fetches', async () => {
-    const { impl, calls } = fakeFetch({ used: 100 });
+  it('DEEP / STOP / refresh / idle produce ZERO /api/usage calls (claims and release only)', async () => {
+    const { impl, calls } = fakeFetch({ usageResponse: OK_START });
     const t = createUsageTelemetry({ fetchImpl: impl });
-    t.setQuota(QUOTA);
-    // page load does NOT call refreshMonitoringBase — contract: refresh -> 0
-    expect(calls.length).toBe(0);
-    expect(t.hasLiveBase()).toBe(false);
+    await t.startRun('dev-A');
+    await t.claimRequest();
+    await t.claimRequest();
+    await t.releaseSession();
+    const usageCalls = calls.filter((c) => c.url.includes('/api/usage'));
+    expect(usageCalls.length).toBe(1); // only the RUN-start Monitoring query
   });
 
-  it('idle = 0 fetches; STOP alone = 0 fetches; DEEP alone = 0 fetches', async () => {
-    const { impl, calls } = fakeFetch({ used: 100 });
+  it('blocked >= 950: startRun returns blocked, no session', async () => {
+    const { impl } = fakeFetch({ usageResponse: { used: 950, cap: 1000, safetyStop: 950, blocked: true } });
     const t = createUsageTelemetry({ fetchImpl: impl });
-    t.setQuota(QUOTA);
-    expect(calls.length).toBe(0); // idle
-    t.accountRequest(); // STOP/delta simulation without any fetch
-    expect(calls.length).toBe(0);
-    t.resetSession();
-    expect(calls.length).toBe(0); // deep without fetch
+    const start = await t.startRun('dev-A');
+    expect(start.ok).toBe(false);
+    expect(start.blocked).toBe(true);
+    expect(t.hasSession()).toBe(false);
   });
 
-  it('Monitoring failure at RUN start = FAIL CLOSED (RUN blocked)', async () => {
-    const { impl } = fakeFetch({ used: 0, failOnce: true });
+  it('locked by another device: startRun returns locked (no session)', async () => {
+    const { impl } = fakeFetch({ usageResponse: { used: 300, cap: 1000, safetyStop: 950, locked: true } });
     const t = createUsageTelemetry({ fetchImpl: impl });
-    t.setQuota(QUOTA);
-    const base = await t.refreshMonitoringBase();
-    expect(base.ok).toBe(false);
-    expect(t.hasLiveBase()).toBe(false); // no usable baseline
+    const start = await t.startRun('dev-A');
+    expect(start.ok).toBe(false);
+    expect(start.locked).toBe(true);
   });
 
-  it('network throw at RUN start = FAIL CLOSED', async () => {
-    const { impl } = fakeFetch({ used: 0, throwOnce: true });
+  it('Monitoring/Redis failure at RUN start -> fail closed, RUN blocked', async () => {
+    const { impl } = fakeFetch({ usageResponse: OK_START, usageFailOnce: true });
     const t = createUsageTelemetry({ fetchImpl: impl });
-    t.setQuota(QUOTA);
-    const base = await t.refreshMonitoringBase();
-    expect(base.ok).toBe(false);
+    const start = await t.startRun('dev-A');
+    expect(start.ok).toBe(false);
+    expect(start.blocked).toBe(true);
   });
 
-  it('baseline 949 -> at most ONE more outbound Places request may be attempted', async () => {
-    const { impl } = fakeFetch({ used: 949 });
+  it('claim failure (cap/ownership/no_session/redis) -> request NOT issued (ok:false)', async () => {
+    const { impl } = fakeFetch({ usageResponse: OK_START, claimFails: true });
     const t = createUsageTelemetry({ fetchImpl: impl });
-    t.setQuota(QUOTA);
-    await t.refreshMonitoringBase();
-    expect(t.canIssueRequest()).toBe(true); // 949 < 950 -> allowed
-    t.accountRequest(); // request #950 is issued (allowed: baseline 949 + 1)
-    expect(t.effectiveUsage()).toBe(950);
-    expect(t.canIssueRequest()).toBe(false); // #951 NOT allowed
+    await t.startRun('dev-A');
+    const claim = await t.claimRequest();
+    expect(claim.ok).toBe(false);
+    expect(claim.reason).toBe('claim_failed');
   });
 
-  it('baseline 950 = RUN blocked, zero new Places requests', async () => {
-    const { impl } = fakeFetch({ used: 950 });
+  it('server rejects claim #51 -> telemetry reports cap; the app never issues #51', async () => {
+    const { impl } = fakeFetch({ usageResponse: OK_START, claimFailAfter: SESSION_CONTRACT.maxSessionRequests, claimFailReason: 'cap' });
     const t = createUsageTelemetry({ fetchImpl: impl });
-    t.setQuota(QUOTA);
-    await t.refreshMonitoringBase();
-    expect(t.canIssueRequest()).toBe(false);
-    expect(t.effectiveUsage()).toBe(950);
-  });
-
-  it('effectiveUsage reaches 950 mid-session -> next request NOT issued', async () => {
-    const { impl } = fakeFetch({ used: 900 });
-    const t = createUsageTelemetry({ fetchImpl: impl });
-    t.setQuota(QUOTA);
-    await t.refreshMonitoringBase();
-    for (let i = 0; i < 50; i++) {
-      if (!t.canIssueRequest()) break; // gate BEFORE issuing
-      t.accountRequest();
+    await t.startRun('dev-A');
+    let issued = 0;
+    for (let i = 1; i <= SESSION_CONTRACT.maxSessionRequests + 1; i++) {
+      const claim = await t.claimRequest();
+      if (claim.ok) issued++;
     }
-    expect(t.effectiveUsage()).toBe(950);
-    expect(t.canIssueRequest()).toBe(false);
+    expect(issued).toBe(SESSION_CONTRACT.maxSessionRequests); // 50 issued, #51 refused
+    expect(t.sessionAttempts()).toBe(SESSION_CONTRACT.maxSessionRequests);
   });
 
-  it('retry/error attempts are counted (accounted BEFORE issue, never rolled back)', async () => {
-    const { impl } = fakeFetch({ used: 900 });
+  it('status is Redis-only (no /api/usage call) — Device-B page-load UX', async () => {
+    const { impl, calls } = fakeFetch({ usageResponse: OK_START, statusActive: true });
     const t = createUsageTelemetry({ fetchImpl: impl });
-    t.setQuota(QUOTA);
-    await t.refreshMonitoringBase();
-    // attempt 1 fails (network error) — still accounted
-    t.accountRequest();
-    expect(t.effectiveUsage()).toBe(901);
-    // attempt 2 fails (HTTP error) — still accounted
-    t.accountRequest();
-    expect(t.effectiveUsage()).toBe(902);
-    // attempt 3 succeeds
-    t.accountRequest();
-    expect(t.effectiveUsage()).toBe(903);
+    const st = await t.status();
+    expect(st.ok).toBe(true);
+    expect(st.active).toBe(true);
+    expect(st.activeSessionId).toBe('sess-other');
+    expect(calls.filter((c) => c.url.includes('/api/usage')).length).toBe(0);
   });
 
-  it('concurrent RUN starts share ONE in-flight fetch (dedupe)', async () => {
-    let resolveFetch;
-    const calls = [];
-    const impl = () => new Promise((resolve) => {
-      calls.push('fetch');
-      resolveFetch = () => resolve({ ok: true, status: 200, json: async () => ({ used: 42 }) });
-    });
+  it('release clears the session (safe compare-and-release, not a Monitoring query)', async () => {
+    const { impl, calls } = fakeFetch({ usageResponse: OK_START });
     const t = createUsageTelemetry({ fetchImpl: impl });
-    t.setQuota(QUOTA);
-    const p1 = t.refreshMonitoringBase();
-    const p2 = t.refreshMonitoringBase();
-    resolveFetch();
-    const [r1, r2] = await Promise.all([p1, p2]);
-    expect(r1.ok && r2.ok).toBe(true);
-    expect(calls.length).toBe(1); // deduped
+    await t.startRun('dev-A');
+    expect(t.hasSession()).toBe(true);
+    const rel = await t.releaseSession();
+    expect(rel.ok).toBe(true);
+    expect(t.hasSession()).toBe(false);
+    expect(calls.filter((c) => c.url.includes('mode=release')).length).toBe(1);
   });
 
   it('no timer polling exists in the telemetry module', () => {
     const { readFileSync } = require('node:fs');
     const { resolve } = require('node:path');
     const source = readFileSync(resolve(process.cwd(), 'src/usageTelemetry.js'), 'utf8');
-    // real timer CALLS are forbidden (comment mentions are fine)
     expect(source).not.toContain('setInterval(');
     expect(source).not.toContain('setTimeout(');
   });
 
-  it('successful RUN fetch resets localSessionDelta (new session baseline)', async () => {
-    const { impl } = fakeFetch({ used: 300 });
-    const t = createUsageTelemetry({ fetchImpl: impl });
-    t.setQuota(QUOTA);
-    await t.refreshMonitoringBase();
-    t.accountRequest(); t.accountRequest();
-    expect(t.effectiveUsage()).toBe(302);
-    await t.refreshMonitoringBase(); // new RUN session
-    expect(t.effectiveUsage()).toBe(300); // delta reset
+  it('contract constants: 50 / 120s / 950 / 1000', () => {
+    expect(SESSION_CONTRACT.maxSessionRequests).toBe(50);
+    expect(SESSION_CONTRACT.leaseTtlSeconds).toBe(120);
+    expect(SESSION_CONTRACT.safetyStop).toBe(950);
+    expect(SESSION_CONTRACT.allowance).toBe(1000);
   });
 });

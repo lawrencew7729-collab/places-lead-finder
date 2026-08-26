@@ -1,90 +1,54 @@
 /**
- * R1 REVISED QUOTA SAFETY CONTRACT — event-driven usage telemetry (browser).
+ * R1 CENTRALIZED QUOTA/LOCK CONTRACT — browser usage telemetry (UX layer).
  *
  * Owner-approved (2026-08-26):
- *   Google monthly allowance = 1000 ALL Places API (New) requests
- *   AMBER = 900 · HARD SAFETY STOP = 950 · reserved buffer = 50
- *   No new Places request may intentionally be issued once
- *   effectiveUsage >= 950.
+ *   - ONE centralized Upstash Redis DB; per-tenant ACL credential.
+ *   - Google allowance 1000 ALL Places requests/month · AMBER 900
+ *   - SAFETY STOP 950 blocks NEW top-level RUN (an authorized session may
+ *     finish above 950, bounded by the HARD server-side 50-attempt cap).
+ *   - Only ONE device may hold an active search (SET NX lease, TTL 120s,
+ *     renewed by every successful claim; no heartbeat polling).
  *
- * Event contract (per top-level RUN SEARCH session):
- *   RUN SEARCH                  -> maximum ONE Shared Monitoring fetch
- *   CONTINUE / DEEP SEARCH      -> 0
- *   STOP                        -> 0
- *   browser refresh / page load -> 0
- *   idle                        -> 0
- *   timer / setInterval polling -> FORBIDDEN (none exists in this module)
- *
- * effectiveUsage = monitoringBase + localSessionDelta
- *   - monitoringBase : latest AVAILABLE Monitoring snapshot, fetched once at
- *     RUN SEARCH start. Fail-closed: fetch failure OR baseline >= 950 blocks
- *     RUN. The snapshot is NOT mathematically real-time (Monitoring reporting
- *     has delay); the 50-request reserve absorbs that delay.
- *   - localSessionDelta : incremented BEFORE every outbound Places API
- *     request ATTEMPT (normal search, pagination, deep search, retries, and
- *     requests that later error). Request #951 is never intentionally issued.
- *
- * The Monitoring counter counts ALL Places API (New) requests — the
- * authoritative operational safety basis. It is NEVER claimed as Text Search
- * Enterprise / billing-SKU usage.
+ * SECURITY MODEL: the browser counter is UX ONLY. The AUTHORITATIVE gate is
+ * the server-side atomic claim (api/session.js): every outbound Places
+ * request attempt must claim first; the Google request is issued ONLY after
+ * the claim succeeds (lease owned + attempts < 50 + usage incremented).
  */
+export const SESSION_CONTRACT = Object.freeze({
+  maxSessionRequests: 50,
+  leaseTtlSeconds: 120,
+  safetyStop: 950,
+  allowance: 1000,
+});
+
 export function createUsageTelemetry({ fetchImpl, now = () => Date.now() } = {}) {
   const doFetch = fetchImpl || ((url, init) => fetch(url, init));
-  let monitoringBase = null; // null = no fresh snapshot in this page life
-  let localSessionDelta = 0;
+  let sessionId = null;
+  let used = null;          // last authoritative shared usage (server responses)
+  let cap = SESSION_CONTRACT.allowance;
+  let safetyStop = SESSION_CONTRACT.safetyStop;
+  let sessionAttempts = 0;  // UX mirror — server is the authority
   let inflightPromise = null;
-  let quota = { monthlyTarget: 1000, redRequests: 950 };
 
-  function setQuota(q) {
-    quota = q || quota;
-  }
-
-  /** effectiveUsage = monitoringBase + localSessionDelta (safety basis). */
-  function effectiveUsage() {
-    return (monitoringBase ?? 0) + localSessionDelta;
-  }
-
-  /** True once a fresh Monitoring snapshot exists for this page life. */
-  function hasLiveBase() {
-    return monitoringBase !== null;
-  }
-
-  /** Fail-closed gate: no request may be issued at/after the safety stop. */
-  function canIssueRequest() {
-    return effectiveUsage() < quota.redRequests;
-  }
-
-  /** MUST be called BEFORE issuing every outbound Places request attempt. */
-  function accountRequest() {
-    localSessionDelta += 1;
-  }
-
-  /** Start of a new session: local accounting resets, base is kept. */
-  function resetSession() {
-    localSessionDelta = 0;
-  }
-
-  /**
-   * Fetch ONE latest-available Monitoring baseline (deduped: concurrent
-   * callers share the same in-flight fetch). Resets localSessionDelta on
-   * success. Returns { ok:true, used, cap } or { ok:false, error } —
-   * callers MUST fail closed on !ok.
-   */
-  function refreshMonitoringBase() {
+  /** One Monitoring query max per top-level RUN (server does reconcile+lease). */
+  function startRun(deviceId) {
     if (inflightPromise) return inflightPromise;
     inflightPromise = (async () => {
       try {
-        const r = await doFetch('/api/usage', { cache: 'no-store' });
-        if (!r.ok) throw new Error('http ' + r.status);
-        const j = await r.json();
-        if (typeof j.used !== 'number' || !Number.isFinite(j.used)) {
-          throw new Error('unexpected usage payload');
-        }
-        monitoringBase = Math.max(0, Math.floor(j.used));
-        localSessionDelta = 0;
-        return { ok: true, used: monitoringBase, cap: typeof j.cap === 'number' ? j.cap : quota.monthlyTarget };
+        const r = await doFetch('/api/usage?deviceId=' + encodeURIComponent(deviceId || ''), { cache: 'no-store' });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || j.error) return { ok: false, blocked: true, error: 'usage check failed' };
+        cap = typeof j.cap === 'number' ? j.cap : cap;
+        safetyStop = typeof j.safetyStop === 'number' ? j.safetyStop : safetyStop;
+        used = typeof j.used === 'number' ? j.used : used;
+        if (j.blocked) return { ok: false, blocked: true, used, cap, safetyStop };
+        if (j.locked) return { ok: false, locked: true, used, cap, safetyStop };
+        if (!j.sessionId) return { ok: false, blocked: true, error: 'usage check failed' };
+        sessionId = j.sessionId;
+        sessionAttempts = 0;
+        return { ok: true, sessionId, used, cap, safetyStop, expiresAt: j.expiresAt, maxSessionRequests: j.maxSessionRequests };
       } catch (e) {
-        return { ok: false, error: String((e && e.message) || e) };
+        return { ok: false, blocked: true, error: String((e && e.message) || e) };
       } finally {
         inflightPromise = null;
       }
@@ -92,13 +56,60 @@ export function createUsageTelemetry({ fetchImpl, now = () => Date.now() } = {})
     return inflightPromise;
   }
 
+  /**
+   * Server-authoritative atomic claim for ONE outbound Places request attempt.
+   * FAIL CLOSED: any failure means the Google request must NOT be issued.
+   */
+  async function claimRequest() {
+    if (!sessionId) return { ok: false, reason: 'no_session' };
+    try {
+      const r = await doFetch('/api/session?mode=claim&sessionId=' + encodeURIComponent(sessionId), { method: 'POST', cache: 'no-store' });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok || !j.ok) return { ok: false, reason: j.reason || 'claim_failed' };
+      sessionAttempts = Number(j.attempts) || 0;
+      if (typeof j.used === 'number') used = j.used;
+      return { ok: true, attempts: sessionAttempts, used };
+    } catch (e) {
+      return { ok: false, reason: 'claim_failed' };
+    }
+  }
+
+  /** Safe compare-and-release (STOP / normal finish). Not a Monitoring query. */
+  async function releaseSession() {
+    const sid = sessionId;
+    sessionId = null;
+    if (!sid) return { ok: true };
+    try {
+      const r = await doFetch('/api/session?mode=release&sessionId=' + encodeURIComponent(sid), { method: 'POST', cache: 'no-store' });
+      const j = await r.json().catch(() => ({}));
+      return { ok: r.ok && j.ok !== false, reason: j.reason };
+    } catch (e) {
+      // Lease self-heals via TTL — release failure is not fatal.
+      return { ok: false, reason: 'release_failed' };
+    }
+  }
+
+  /** Redis-only status (page load / Device-B UX). NEVER a Monitoring query. */
+  async function status() {
+    try {
+      const r = await doFetch('/api/session?mode=status', { cache: 'no-store' });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) return { ok: false };
+      return { ok: true, active: j.active === true, activeSessionId: j.sessionId || null, used: typeof j.used === 'number' ? j.used : null };
+    } catch (e) {
+      return { ok: false };
+    }
+  }
+
   return {
-    setQuota,
-    effectiveUsage,
-    hasLiveBase,
-    canIssueRequest,
-    accountRequest,
-    resetSession,
-    refreshMonitoringBase,
+    startRun,
+    claimRequest,
+    releaseSession,
+    status,
+    hasSession: () => Boolean(sessionId),
+    sessionAttempts: () => sessionAttempts,
+    effectiveUsage: () => used ?? 0,
+    safetyStop: () => safetyStop,
+    allowance: () => cap,
   };
 }

@@ -1,12 +1,12 @@
 /**
- * R1 TWO-DEVICE CONTRACT — customer-app device lock (api/device.js, v1.0.2).
+ * R1 TWO-DEVICE CONTRACT — customer-app device lock (api/device.js, v1.0.4).
  *
  * Owner policy (approved): every NEW Lead Finder customer deployment enforces
- * MAX_DEVICES = 2 on an INDEPENDENT dedicated KV store, keyed by the IMMUTABLE
- * tenant id (lf_dev:<CUSTOMER_TENANT_ID>). First two authorized devices claim
- * the slots; a third unknown device is DENIED; no automatic eviction; no TTL;
- * owner-controlled release only. Missing tenant id / KV / access code →
- * FAIL CLOSED (never degrades to open mode).
+ * MAX_DEVICES = 2, keyed by the IMMUTABLE tenant id
+ * (tenant:<CUSTOMER_TENANT_ID> — CENTRALIZED Upstash model, per-tenant ACL).
+ * First two authorized devices claim the slots; a third unknown device is
+ * DENIED; no automatic eviction; no TTL; owner-controlled release only.
+ * Missing tenant id / KV / access code → FAIL CLOSED (never degrades to open).
  *
  * These tests exercise the real /api/device handler with a scripted
  * in-memory Upstash-REST-compatible KV transport (no live store).
@@ -20,21 +20,20 @@ const APP_PASS = 'accesscode123456'; // 16-char customer access code
 const TENANT_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const TENANT_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 
-/** In-memory Upstash-REST-compatible KV backing store + call log. */
+/** In-memory Upstash-REST-compatible KV backing store + call log (v1.0.4 protocol). */
 function createKv() {
   const store = new Map();
   const calls = [];
   const fetchMock = vi.fn(async (url, init = {}) => {
     calls.push({ url: String(url), method: init.method ?? 'GET', body: init.body ?? null });
     const u = String(url);
-    if (u.includes('/get/')) {
-      const key = decodeURIComponent(u.split('/get/')[1]);
-      const raw = store.has(key) ? JSON.stringify(store.get(key)) : null;
+    const args = init.body ? JSON.parse(init.body) : [];
+    if (u.endsWith('/get')) {
+      const raw = store.has(args[0]) ? JSON.stringify(store.get(args[0])) : null;
       return { ok: true, status: 200, json: async () => ({ result: raw }) };
     }
-    if (u.includes('/set/')) {
-      const key = decodeURIComponent(u.split('/set/')[1]);
-      store.set(key, JSON.parse(init.body));
+    if (u.endsWith('/set')) {
+      store.set(args[0], JSON.parse(args[1]));
       return { ok: true, status: 200, json: async () => ({ result: 'OK' }) };
     }
     throw new Error('unexpected kv url ' + u);
@@ -118,7 +117,7 @@ describe('two-device contract — slot claiming', () => {
     expect(j.reason).toBe('limit');
     expect(j.max).toBe(2);
     // denied device is NOT persisted
-    expect(kv.store.get(`lf_dev:${TENANT_A}`).devices.map((d) => d.id)).toEqual(['dev-A', 'dev-B']);
+    expect(kv.store.get(`tenant:${TENANT_A}:devices`).devices.map((d) => d.id)).toEqual(['dev-A', 'dev-B']);
   });
 
   it('registered devices remain allowed (check + re-register idempotent)', async () => {
@@ -130,7 +129,7 @@ describe('two-device contract — slot claiming', () => {
     const calls2 = await register(TENANT_A, 'dev-A');
     expect(jsonOf(calls2).allowed).toBe(true);
     expect(jsonOf(calls2).devices).toBe(2);
-    expect(kv.store.get(`lf_dev:${TENANT_A}`).devices).toHaveLength(2);
+    expect(kv.store.get(`tenant:${TENANT_A}:devices`).devices).toHaveLength(2);
   });
 
   it('wrong access code is refused even for a registered device (server APP_PASS enforcement)', async () => {
@@ -151,7 +150,7 @@ describe('two-device contract — slot claiming', () => {
 describe('two-device contract — no automatic eviction', () => {
   it('registry write carries NO expiry (no EX TTL) — no automatic slot release', async () => {
     await register(TENANT_A, 'dev-A');
-    const setCalls = kv.calls.filter((c) => c.url.includes('/set/'));
+    const setCalls = kv.calls.filter((c) => c.url.includes('/set'));
     expect(setCalls.length).toBeGreaterThan(0);
     for (const c of setCalls) {
       expect(c.url).not.toMatch(/[?&]EX=/);
@@ -164,7 +163,7 @@ describe('two-device contract — no automatic eviction', () => {
     const { res } = makeRes();
     await deviceHandler(makeReq({ mode: 'check', id: 'dev-A' }), res);
     await deviceHandler(makeReq({ mode: 'check', id: 'dev-A' }), res);
-    expect(kv.store.get(`lf_dev:${TENANT_A}`).devices).toHaveLength(1);
+    expect(kv.store.get(`tenant:${TENANT_A}:devices`).devices).toHaveLength(1);
   });
 });
 
@@ -183,7 +182,7 @@ describe('two-device contract — owner-controlled isolated maintenance (no publ
     await register(TENANT_A, 'dev-B');
     // OWNER-CONTROLLED ISOLATED MAINTENANCE: direct operation on THAT customer's
     // dedicated store key — no runtime endpoint involved.
-    kv.store.delete(`lf_dev:${TENANT_A}`);
+    kv.store.delete(`tenant:${TENANT_A}:devices`);
     // both slots freed; a fresh device can claim slot 1 again
     const calls = await register(TENANT_A, 'dev-A');
     expect(jsonOf(calls).allowed).toBe(true);
@@ -194,9 +193,9 @@ describe('two-device contract — owner-controlled isolated maintenance (no publ
     await register(TENANT_A, 'dev-A');
     await register(TENANT_A, 'dev-B');
     // direct store edit: drop dev-A from the registry record (owner maintenance)
-    const rec = kv.store.get(`lf_dev:${TENANT_A}`);
+    const rec = kv.store.get(`tenant:${TENANT_A}:devices`);
     rec.devices = rec.devices.filter((d) => d.id !== 'dev-A');
-    kv.store.set(`lf_dev:${TENANT_A}`, rec);
+    kv.store.set(`tenant:${TENANT_A}:devices`, rec);
     // replacement device C occupies the released slot
     const calls = await register(TENANT_A, 'dev-C');
     expect(jsonOf(calls).allowed).toBe(true);
@@ -210,11 +209,11 @@ describe('two-device contract — owner-controlled isolated maintenance (no publ
     await register(TENANT_B, 'B-dev1');
     await register(TENANT_B, 'B-dev2');
     // owner maintenance on tenant B's key only
-    kv.store.delete(`lf_dev:${TENANT_B}`);
+    kv.store.delete(`tenant:${TENANT_B}:devices`);
     // tenant A registry untouched
-    expect(kv.store.get(`lf_dev:${TENANT_A}`).devices).toHaveLength(2);
+    expect(kv.store.get(`tenant:${TENANT_A}:devices`).devices).toHaveLength(2);
     // tenant B freed
-    expect(kv.store.has(`lf_dev:${TENANT_B}`)).toBe(false);
+    expect(kv.store.has(`tenant:${TENANT_B}:devices`)).toBe(false);
     // B can now re-register; A is still at its limit
     vi.stubEnv('CUSTOMER_TENANT_ID', TENANT_B);
     const calls = await register(TENANT_B, 'B-dev1');
@@ -239,8 +238,8 @@ describe('two-device contract — immutable tenant identity isolation', () => {
     expect(jsonOf(calls3).allowed).toBe(false);
     expect(jsonOf(calls3).reason).toBe('limit');
     // separate KV keys per tenant
-    expect(kv.store.get(`lf_dev:${TENANT_A}`).devices).toHaveLength(2);
-    expect(kv.store.get(`lf_dev:${TENANT_B}`).devices).toHaveLength(2);
+    expect(kv.store.get(`tenant:${TENANT_A}:devices`).devices).toHaveLength(2);
+    expect(kv.store.get(`tenant:${TENANT_B}:devices`).devices).toHaveLength(2);
   });
 
   it('same tenant across different hosts → SAME registry (hostname is NOT the identity)', async () => {
