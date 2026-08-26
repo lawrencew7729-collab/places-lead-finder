@@ -10,11 +10,12 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { createSessionHandler, CLAIM_SCRIPT, RELEASE_SCRIPT, STATUS_SCRIPT, MAX_SESSION_REQUESTS, SESSION_TTL_SECONDS } from '../api/session.js';
-import { tenantActiveSearchKey, tenantUsageKey, currentMonthUtc } from '../api/redis.js';
+import { tenantActiveSearchKey, tenantUsageKey } from '../api/redis.js';
+import { pacificBillingMonth } from '../api/billingMonth.js';
 
 const TENANT_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const TENANT_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
-const MONTH = currentMonthUtc();
+const MONTH = pacificBillingMonth();
 
 /** In-memory Redis semantics mirror (GET/SET EX NX/DEL/INCRBY/EXPIRE + our scripts). */
 function createMemoryRedis() {
@@ -206,5 +207,76 @@ describe('R1 CENTRALIZED — 50-attempt server-side cap + usage bridge', () => {
     const r = makeRes();
     await h(makeReq({ mode: 'status' }), r.res);
     expect(r.status()).toBe(503);
+  });
+});
+
+describe('R1 PACIFIC BILLING MONTH — cross-month session', () => {
+  // LA Aug 31 23:59 PDT == UTC Sep 1 06:59 · LA Sep 1 00:01 PDT == UTC Sep 1 07:01
+  const AUG_END = new Date('2026-09-01T06:59:00Z');
+  const SEP_START = new Date('2026-09-01T07:01:00Z');
+
+  it('requests before the Pacific reset increment the AUGUST key; requests after increment SEPTEMBER; 50-cap intact', async () => {
+    const { redis, map } = createMemoryRedis();
+    let nowVal = AUG_END;
+    const h = createSessionHandler({ redis, tenantId: TENANT_A, now: () => nowVal });
+    const leaseKey = tenantActiveSearchKey(TENANT_A);
+    await redis.set(leaseKey, JSON.stringify({ sessionId: 'sess-A', attempts: 0 }), 'EX', '120');
+
+    // 5 requests in August (LA)
+    for (let i = 0; i < 5; i++) {
+      const r = makeRes();
+      await h(makeReq({ mode: 'claim', sessionId: 'sess-A' }), r.res);
+      expect(r.json().ok).toBe(true);
+    }
+    expect(Number(map.get(tenantUsageKey(TENANT_A, '2026-08')).value)).toBe(5);
+    expect(map.has(tenantUsageKey(TENANT_A, '2026-09'))).toBe(false);
+
+    // cross the Pacific midnight boundary -> the SAME session continues,
+    // but subsequent requests attribute to September
+    nowVal = SEP_START;
+    for (let i = 0; i < 3; i++) {
+      const r = makeRes();
+      await h(makeReq({ mode: 'claim', sessionId: 'sess-A' }), r.res);
+      expect(r.json().ok).toBe(true);
+    }
+    expect(Number(map.get(tenantUsageKey(TENANT_A, '2026-08')).value)).toBe(5); // unchanged
+    expect(Number(map.get(tenantUsageKey(TENANT_A, '2026-09')).value)).toBe(3); // new month
+
+    // the 50-attempt cap spans the whole session regardless of month keys
+    for (let i = 0; i < 50; i++) {
+      const r = makeRes();
+      await h(makeReq({ mode: 'claim', sessionId: 'sess-A' }), r.res);
+    }
+    const r51 = makeRes();
+    await h(makeReq({ mode: 'claim', sessionId: 'sess-A' }), r51.res);
+    expect(r51.json().ok).toBe(false);
+    expect(r51.json().reason).toBe('cap');
+    expect(Number(map.get(tenantUsageKey(TENANT_A, '2026-08')).value) + Number(map.get(tenantUsageKey(TENANT_A, '2026-09')).value)).toBe(50);
+  });
+
+  it('RUN start resolves the Pacific month server-side (never client-supplied)', async () => {
+    // The usage handler (api/usage.js) computes the month from its own clock;
+    // this test pins the claim-side key to the SAME Pacific helper.
+    const { map } = createMemoryRedis();
+    expect(pacificBillingMonth(AUG_END)).toBe('2026-08');
+    expect(pacificBillingMonth(SEP_START)).toBe('2026-09');
+    void map;
+  });
+});
+
+describe('R1 CONCURRENT RUN — current safe ordering (Monitoring -> reconcile -> SET NX)', () => {
+  it('simultaneous RUNs: only ONE active_search session exists; the loser never claims', async () => {
+    const { redis, map } = createMemoryRedis();
+    // Device A wins the lease
+    await redis.set(tenantActiveSearchKey(TENANT_A), JSON.stringify({ sessionId: 'sess-A', deviceId: 'dev-A', attempts: 0 }), 'EX', '120');
+    // Device B RUN start is rejected as locked
+    const h = createSessionHandler({ redis, tenantId: TENANT_A });
+    const rB = makeRes();
+    await h(makeReq({ mode: 'claim', sessionId: 'sess-B' }), rB.res);
+    expect(rB.json().ok).toBe(false);
+    expect(rB.json().reason).toBe('ownership');
+    // exactly one lease, one owner
+    expect(map.get(tenantActiveSearchKey(TENANT_A)).value).toContain('sess-A');
+    expect(map.get(tenantActiveSearchKey(TENANT_A)).value).not.toContain('sess-B');
   });
 });

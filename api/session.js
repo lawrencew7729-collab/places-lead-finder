@@ -13,7 +13,8 @@
    - All operations use ONLY the customer's own restricted ACL credential
      (~tenant:<TENANT_ID>:* + minimal command allowlist).
    ============================================================ */
-import { redisClient, tenantActiveSearchKey, tenantUsageKey, currentMonthUtc } from './redis.js';
+import { redisClient, tenantActiveSearchKey, tenantUsageKey } from './redis.js';
+import { pacificBillingMonth } from './billingMonth.js';
 
 export const SESSION_TTL_SECONDS = 120;
 export const MAX_SESSION_REQUESTS = 50;
@@ -49,7 +50,7 @@ return {lease, usage}
 `;
 
 export function createSessionHandler(deps = {}) {
-  const { redis = redisClient(), tenantId = process.env.CUSTOMER_TENANT_ID || '' } = deps;
+  const { redis = redisClient(), tenantId = process.env.CUSTOMER_TENANT_ID || '', now = () => new Date() } = deps;
 
   return async function handler(req, res) {
     res.setHeader('Cache-Control', 'no-store');
@@ -58,7 +59,10 @@ export function createSessionHandler(deps = {}) {
     const mode = req.query && req.query.mode;
     const sessionId = req.query && req.query.sessionId ? String(req.query.sessionId) : '';
     const leaseKey = tenantActiveSearchKey(tenantId);
-    const usageKey = tenantUsageKey(tenantId, currentMonthUtc());
+    // Server-authoritative Pacific billing month, resolved PER REQUEST — a
+    // session crossing the Pacific midnight boundary attributes each request
+    // to the month it actually lands in (never client-supplied).
+    const usageKey = tenantUsageKey(tenantId, pacificBillingMonth(now()));
 
     try {
       switch (mode) {

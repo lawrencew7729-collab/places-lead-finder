@@ -48,6 +48,3 @@ export function tenantActiveSearchKey(tenantId) {
 export function tenantUsageKey(tenantId, month) {
   return `tenant:${tenantId}:usage:${month}`;
 }
-export function currentMonthUtc(now = new Date()) {
-  return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
-}

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createUsageHandler, DEFAULT_MONITORING_SA, RECONCILE_SCRIPT, SAFETY_STOP, GOOGLE_ALLOWANCE } from '../api/usage.js';
+import { pacificBillingMonthStartUtc, pacificBillingMonth } from '../api/billingMonth.js';
 
 function fakeRes() {
   const out = { headers: {}, body: null, statusCode: 200 };
@@ -99,8 +100,13 @@ describe('R1 CENTRALIZED RUN START — Monitoring + Redis reconcile + lease acqu
     expect(res.__out.body.leaseTtlSeconds).toBe(120);
     expect(res.__out.body.blocked).toBeUndefined();
     expect(res.__out.body.locked).toBeUndefined();
-    // exactly ONE Monitoring query happened
-    expect(calls.filter((c) => String(c.url).includes('monitoring.googleapis.com')).length).toBe(1);
+    // exactly ONE Monitoring query happened, with the PACIFIC month-start interval
+    const monCalls = calls.filter((c) => String(c.url).includes('monitoring.googleapis.com'));
+    expect(monCalls.length).toBe(1);
+    const monUrl = String(monCalls[0].url);
+    const expectedStart = encodeURIComponent(new Date(pacificBillingMonthStartUtc()).toISOString());
+    expect(monUrl).toContain('interval.startTime=' + expectedStart);
+    expect(res.__out.body.month).toBe(pacificBillingMonth());
     expect(redis.calls.some(([k, v]) => k === 'eval' && v === 'reconcile')).toBe(true);
     expect(redis.calls.some(([k]) => k === 'set')).toBe(true); // NX acquire
     delete process.env.CUSTOMER_GOOGLE_PROJECT_ID;

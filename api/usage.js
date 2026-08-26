@@ -9,7 +9,8 @@
 // Text Search Enterprise / billing-SKU usage.
 // ESM format (matches root package.json "type": "module").
 import { getVercelOidcToken } from '@vercel/oidc';
-import { redisClient, tenantActiveSearchKey, tenantUsageKey, currentMonthUtc } from './redis.js';
+import { redisClient, tenantActiveSearchKey, tenantUsageKey } from './redis.js';
+import { pacificBillingMonth, pacificBillingMonthStartUtc } from './billingMonth.js';
 import { SESSION_TTL_SECONDS, MAX_SESSION_REQUESTS } from './session.js';
 
 const MONITORING_SCOPE = 'https://www.googleapis.com/auth/monitoring.read';
@@ -61,9 +62,11 @@ async function exchangeForSaToken(oidcToken, audience, sa, fetchImpl) {
 }
 
 /** Broad Places API (New) request count, calendar month to date (safety basis). */
-async function getPlacesUsage(token, projectId, fetchImpl) {
-  const now = new Date();
-  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
+async function getPlacesUsage(token, projectId, fetchImpl, now = new Date()) {
+  // Google billing month resets at 00:00 America/Los_Angeles on the first of
+  // the Pacific calendar month — the interval MUST start at that exact
+  // absolute instant (DST-aware), never the UTC month start.
+  const start = new Date(pacificBillingMonthStartUtc(now)).toISOString();
   const end = now.toISOString();
   const filter = encodeURIComponent(
     'metric.type="serviceruntime.googleapis.com/api/request_count"' +
@@ -71,8 +74,8 @@ async function getPlacesUsage(token, projectId, fetchImpl) {
   );
   const url = MON_URL + projectId + '/timeSeries' +
     '?filter=' + filter +
-    '&interval.startTime=' + start +
-    '&interval.endTime=' + end +
+    '&interval.startTime=' + encodeURIComponent(start) +
+    '&interval.endTime=' + encodeURIComponent(end) +
     '&aggregation.alignmentPeriod=3600s' +
     '&aggregation.perSeriesAligner=ALIGN_SUM';
 
@@ -136,9 +139,10 @@ export function createUsageHandler(deps = {}) {
     try {
       // 1. ONE latest-available Google Monitoring snapshot (broad Places count).
       const token = await exchangeForSaToken(oidcToken, audience, sa, fetchImpl);
-      const monitoringUsed = await getPlacesUsage(token, projectId, fetchImpl);
-      // 2. tenant Redis usage bridge (covers Monitoring propagation delay).
-      const month = currentMonthUtc(now());
+      const monitoringUsed = await getPlacesUsage(token, projectId, fetchImpl, now());
+      // 2. tenant Redis usage bridge (covers Monitoring propagation delay);
+      //    server-authoritative Pacific billing month (never client-supplied).
+      const month = pacificBillingMonth(now());
       const usageKey = tenantUsageKey(tenantId, month);
       const leaseKey = tenantActiveSearchKey(tenantId);
       // 3. atomic reconcile floor — usage can NEVER move backward.
