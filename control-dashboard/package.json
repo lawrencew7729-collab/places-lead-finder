@@ -1,7 +1,7 @@
 {
   "name": "leadfinder-control-dashboard",
   "private": true,
-  "version": "0.2.8-phase2",
+  "version": "0.2.9-phase2",
   "type": "module",
   "scripts": {
     "dev": "vite",

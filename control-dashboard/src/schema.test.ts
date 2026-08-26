@@ -75,3 +75,30 @@ describe('Migration 008 — red safety-stop default hygiene (owner 2026-08-26)',
     expect(s).toContain('4a5cfed05c68fd5065b53d63825b941cdeec0751f9783302e10f4763488d7b17  008_red_safety_stop_default.sql');
   });
 });
+
+describe('Migration 009 — central-store ACL model (owner 2026-08-26)', () => {
+  const central = () => readFileSync(resolve(process.cwd(), 'supabase/migrations/009_central_store_acl_model.sql'), 'utf8').toLowerCase();
+  const sums = () => readFileSync(resolve(process.cwd(), 'supabase/migrations/SHA256SUMS'), 'utf8');
+
+  it('drops ONLY the dedicated-store UNIQUE fingerprint constraint', () => {
+    const sql = central();
+    expect(sql).toContain('drop constraint customer_configurations_store_fingerprint_unique');
+    expect(sql).not.toContain('add constraint');
+    expect(sql).not.toContain('update public.customer_configurations');
+    expect(sql).not.toContain('drop column');
+  });
+
+  it('keeps device_store_fingerprint as central-store identity metadata (no column change)', () => {
+    const sql = central();
+    expect(sql).not.toContain('alter column device_store_fingerprint');
+  });
+
+  it('frozen migrations 005/006/007/008 checksums unchanged; 009 checksum recorded', () => {
+    const s = sums();
+    expect(s).toContain('474497cb02684eeea75b073c25a41115c3ea669b26581808096129a3efc42c79  005_quota_contract_alignment.sql');
+    expect(s).toContain('1e2b679e82f6e34256f60316001051d326612939dd9eb142d04ef159b9df914d  006_full_fingerprint_contract.sql');
+    expect(s).toContain('a451d2014014cc398e1a4aa86522bdb6161560c712f49ad3954ea132f86974a4  007_device_lock_contract.sql');
+    expect(s).toContain('4a5cfed05c68fd5065b53d63825b941cdeec0751f9783302e10f4763488d7b17  008_red_safety_stop_default.sql');
+    expect(s).toContain('998d716b967f4ecb0bd1bf1a8f22fd5605d49329371fe304e2b46fc182aabefc  009_central_store_acl_model.sql');
+  });
+});

@@ -52,6 +52,8 @@ export interface ProvisioningInput {
   goldenRelease: GoldenReleaseIdentity;
   centralMonitoringSa: string;
   executionGate: boolean; // must be true (separately authorized R1 gate)
+  /** CENTRAL model (owner-approved): all tenants share one central Redis store; isolation = tenant UUID namespace + per-tenant ACL credential. */
+  centralStore?: boolean;
 }
 
 /** Transient inputs consumed at their stage ONLY and discarded — never serialized. */
@@ -231,11 +233,15 @@ export async function runProvisioning(
     if (transient.deviceLockSecrets) {
       const secretsOk = verifyDeviceLockSecrets(transient.deviceLockSecrets);
       if (!secretsOk.consistent) return { ok: false, reason: `device-lock secrets invalid: ${secretsOk.reasons.join('; ')}` };
-      // dedicated-store uniqueness guard (D4): no SECOND tenant may own the same store
+      // store fingerprint (non-secret) — central model shares ONE store across
+      // tenants; isolation = immutable tenant UUID namespace + per-tenant ACL.
       const fingerprint = kvStoreFingerprint(transient.deviceLockSecrets.kvRestApiUrl);
-      const owner = await providers.controlPlane.findByStoreFingerprint(fingerprint);
-      if (owner.ok && owner.tenantId !== tenantId) {
-        return { ok: false, reason: 'dedicated KV store already owned by another tenant' };
+      if (!input.centralStore) {
+        // legacy dedicated-store guard (superseded by the central model):
+        const owner = await providers.controlPlane.findByStoreFingerprint(fingerprint);
+        if (owner.ok && owner.tenantId !== tenantId) {
+          return { ok: false, reason: 'dedicated KV store already owned by another tenant' };
+        }
       }
       const handoff = await providers.deviceLock.configureDeviceLock(projectId, transient.deviceLockSecrets, tenantId);
       if (!handoff.ok) return handoff;

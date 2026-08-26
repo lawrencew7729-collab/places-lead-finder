@@ -50,9 +50,27 @@ describe('R1 TWO-DEVICE CONTRACT — provisioning integration', () => {
     expect(deviceStage?.status).toBe('PASS');
     // persisted policy is tenant-scoped, not hostname-scoped
     const readback = await providers.controlPlane.findConfigByTenant(result.tenantId);
-    expect(readback.config?.devicePolicy.kvNamespace).toBe(`lf_dev:${result.tenantId}`);
+    expect(readback.config?.devicePolicy.kvNamespace).toBe(`tenant:${result.tenantId}`);
     expect(readback.config?.devicePolicy.storeFingerprint).toBe(kvStoreFingerprint(STORE_A));
     expect(readback.config?.devicePolicy.maxDevices).toBe(2);
+  });
+
+  it('CENTRAL model: two tenants may share the same central store (uniqueness by namespace + ACL, not by store)', async () => {
+    const providers = createFakeProviders();
+    const centralUrl = 'https://central.example.com';
+    // tenant A on the central store
+    const first = await runProvisioning(providers, input({ centralStore: true }), { deviceLockSecrets: deviceSecrets(centralUrl) });
+    expect(first.outcome).toBe('CUSTOMER_READY');
+    // tenant B on the SAME central store — allowed under the central model
+    const second = await runProvisioning(providers, input({ slug: 'xyz', centralStore: true }), { deviceLockSecrets: deviceSecrets(centralUrl) });
+    expect(second.outcome).toBe('CUSTOMER_READY');
+    // registries stay isolated by the immutable tenant namespace
+    const cfgA = await providers.controlPlane.findConfigByTenant(first.tenantId);
+    const cfgB = await providers.controlPlane.findConfigByTenant(second.tenantId);
+    expect(cfgA.config?.devicePolicy.kvNamespace).toBe(`tenant:${first.tenantId}`);
+    expect(cfgB.config?.devicePolicy.kvNamespace).toBe(`tenant:${second.tenantId}`);
+    expect(cfgA.config?.devicePolicy.storeFingerprint).toBe(kvStoreFingerprint(centralUrl));
+    expect(cfgB.config?.devicePolicy.storeFingerprint).toBe(kvStoreFingerprint(centralUrl)); // same central store
   });
 
   it('provisioning CANNOT reach CUSTOMER READY when the deployment is open (KV not active)', async () => {

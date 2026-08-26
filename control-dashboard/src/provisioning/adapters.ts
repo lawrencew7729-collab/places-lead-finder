@@ -59,6 +59,12 @@ export function createFakeTransport(script: Array<{ urlPrefix: string; status?: 
 export interface VercelAdapterOptions {
   token: string; // server-side only
   teamId: string;
+  /**
+   * CENTRAL model: the deployment ALWAYS receives the customer's own
+   * restricted ACL credential (never a shared/full-access token), so the
+   * canonical KV_REST_API_* pair is written even when store envs exist.
+   */
+  storeMode?: 'dedicated' | 'central';
   transport?: Transport;
 }
 
@@ -170,9 +176,19 @@ export function createDeviceLockAdapter(options: VercelAdapterOptions): import('
       const existingUrl = valueOf('KV_REST_API_URL') ?? valueOf('UPSTASH_REDIS_REST_URL');
       const existingToken = valueOf('KV_REST_API_TOKEN') ?? valueOf('UPSTASH_REDIS_REST_TOKEN');
       const storeCredsPresent = Boolean(existingUrl && existingToken);
+      const central = options.storeMode === 'central';
 
       const pairs: Array<[string, string]> = [];
-      if (storeCredsPresent) {
+      if (central) {
+        // CENTRAL model (owner-approved): the deployment ALWAYS receives the
+        // customer's OWN restricted ACL credential — an existing env may hold
+        // a shared/full-access token, which is never acceptable. Drift guard:
+        // the deployment store URL (when readable) must equal the central URL.
+        if (existingUrl && normalizeKvStoreUrl(existingUrl) !== normalizeKvStoreUrl(secrets.kvRestApiUrl)) {
+          return { ok: false, reason: 'device policy drift: deployment store differs from central store' };
+        }
+        pairs.push(['KV_REST_API_URL', secrets.kvRestApiUrl], ['KV_REST_API_TOKEN', secrets.kvRestApiToken]);
+      } else if (storeCredsPresent) {
         // Drift guard (belt-and-braces; the DB fingerprint guard also covers
         // this): when the deployment's store URL is readable, it must match
         // the transient handoff store. Unreadable (encrypted KV_*) values

@@ -216,16 +216,10 @@ export function createFakeProviders(options: { failAt?: string[] } = {}): FakePr
         if (!/^[A-F0-9]{64}$/.test(config.devicePolicy.storeFingerprint)) {
           return { ok: false, reason: 'full 64-hex store fingerprint required' };
         }
-        // dedicated-store uniqueness: NO second tenant may own the same store
-        let duplicateOwner = false;
-        configs.forEach((other, otherTenant) => {
-          if (otherTenant !== config.tenantId && other.devicePolicy.storeFingerprint === config.devicePolicy.storeFingerprint) {
-            duplicateOwner = true;
-          }
-        });
-        if (duplicateOwner) {
-          return { ok: false, reason: 'KV store already owned by another tenant' };
-        }
+        // Store ownership/uniqueness is enforced by the EXECUTOR guard
+        // (findByStoreFingerprint for dedicated mode; skipped for the
+        // CENTRAL model — isolation = tenant namespace + per-tenant ACL).
+        // This fake does not re-implement store-level uniqueness.
         configs.set(config.tenantId, config);
         return { ok: true, resourceId: config.tenantId };
       },

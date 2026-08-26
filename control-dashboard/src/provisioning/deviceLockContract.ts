@@ -9,7 +9,7 @@
  * only.
  *
  * Isolation (approved architecture):
- *  - Registry identity = IMMUTABLE tenant id (UUID v4) → `lf_dev:<tenantId>`.
+ *  - Registry identity = IMMUTABLE tenant id (UUID v4) → `tenant:<tenantId>` (CENTRALIZED store, per-tenant ACL).
  *    hostname is NEVER the authoritative identity for new customers.
  *  - Each customer gets ONE dedicated KV store (operator-provided for R1).
  *    Provisioning persists ONLY a non-secret store fingerprint
@@ -32,7 +32,7 @@ import { createHash } from 'node:crypto';
 
 export const DEVICE_LOCK_CONTRACT = Object.freeze({
   maxDevices: 2,
-  kvKeyNamespace: 'lf_dev',
+  kvKeyNamespace: 'tenant',
   mode: 'hard_lock',
   autoEviction: false,
   /** Customer access code length (cryptographically random, generated per customer). */

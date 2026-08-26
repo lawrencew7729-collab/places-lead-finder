@@ -38,7 +38,7 @@ describe('R1 TWO-DEVICE CONTRACT — contract constants', () => {
   it('hard_lock mode, no auto eviction, tenant-scoped namespace', () => {
     expect(DEVICE_LOCK_CONTRACT.mode).toBe('hard_lock');
     expect(DEVICE_LOCK_CONTRACT.autoEviction).toBe(false);
-    expect(DEVICE_LOCK_CONTRACT.kvKeyNamespace).toBe('lf_dev');
+    expect(DEVICE_LOCK_CONTRACT.kvKeyNamespace).toBe('tenant');
   });
 
   it('env contract: dedicated store (either naming) + access code + tenant id; NO DEVICE_ADMIN_SECRET', () => {
@@ -60,7 +60,7 @@ describe('R1 TWO-DEVICE CONTRACT — contract constants', () => {
 
 describe('R1 TWO-DEVICE CONTRACT — tenant-scoped registry namespace', () => {
   it('namespace derives from the IMMUTABLE tenant id, never the hostname', () => {
-    expect(deviceLockNamespaceFor('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')).toBe('lf_dev:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+    expect(deviceLockNamespaceFor('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa')).toBe('tenant:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
     // different tenants → different namespaces
     expect(deviceLockNamespaceFor('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb')).not.toBe(deviceLockNamespaceFor('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'));
   });
@@ -70,7 +70,7 @@ describe('R1 TWO-DEVICE CONTRACT — tenant-scoped registry namespace', () => {
     const policy = devicePolicyFor('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', fp);
     expect(policy.maxDevices).toBe(2);
     expect(policy.mode).toBe('hard_lock');
-    expect(policy.kvNamespace).toBe('lf_dev:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+    expect(policy.kvNamespace).toBe('tenant:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
     expect(policy.appPassConfigured).toBe(true);
     expect(policy.tenantIdConfigured).toBe(true);
     expect(policy.autoEviction).toBe(false);

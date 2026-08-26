@@ -158,7 +158,7 @@ describe('R1 final closure — real server-side adapters', () => {
       devicePolicy: {
         maxDevices: 2,
         mode: 'hard_lock',
-        kvNamespace: 'lf_dev:t1',
+        kvNamespace: 'tenant:t1',
         appPassConfigured: true,
         tenantIdConfigured: true,
         autoEviction: false,
@@ -268,6 +268,53 @@ describe('R1 final closure — real server-side adapters', () => {
     if (res.ok) throw new Error('expected configureDeviceLock to fail');
     expect(res.reason).toContain('drift');
     expect(calls.filter((c) => c.method === 'POST').length).toBe(0); // nothing written
+  });
+
+  it('device-lock adapter CENTRAL mode: ALWAYS writes the customer ACL credential (no shared token reuse), drift vs central URL', async () => {
+    const { transport, calls } = createFakeTransport([
+      { urlPrefix: '/env', body: [
+        { key: 'UPSTASH_REDIS_REST_URL', value: 'https://central.example.com' },
+        { key: 'UPSTASH_REDIS_REST_TOKEN', value: 'tok_shared' },
+      ] },
+      { urlPrefix: '/env', body: {} },
+      { urlPrefix: '/env', body: {} },
+      { urlPrefix: '/env', body: {} },
+      { urlPrefix: '/env', body: {} },
+    ]);
+    const adapter = createDeviceLockAdapter({ token: 't', teamId: 'team_x', storeMode: 'central', transport });
+    const res = await adapter.configureDeviceLock('prj_t1', {
+      kvRestApiUrl: 'https://central.example.com',
+      kvRestApiToken: 'tok_customer_acl_only',
+      appPass: 'accesscode123456',
+    }, '563bfb5f-5ec1-44a8-95b2-2e2ee3e9332b');
+    expect(res.ok).toBe(true);
+    const envPosts = calls.filter((c) => c.url.includes('/env') && c.method === 'POST');
+    // central mode writes ALL FOUR envs — the shared UPSTASH token is NOT reused
+    expect(envPosts.length).toBe(4);
+    const keys = envPosts.map((c) => JSON.parse(c.body ?? '{}').key).sort();
+    expect(keys).toEqual(['APP_PASS', 'CUSTOMER_TENANT_ID', 'KV_REST_API_TOKEN', 'KV_REST_API_URL']);
+    const tokenPost = envPosts.find((c) => JSON.parse(c.body ?? '{}').key === 'KV_REST_API_TOKEN');
+    expect(JSON.parse(tokenPost?.body ?? '{}').value).toBe('tok_customer_acl_only');
+    expect(envPosts.every((c) => !(c.body ?? '').includes('tok_shared'))).toBe(true); // shared token never written
+  });
+
+  it('device-lock adapter CENTRAL mode FAILS when the deployment store differs from the central store', async () => {
+    const { transport, calls } = createFakeTransport([
+      { urlPrefix: '/env', body: [
+        { key: 'KV_REST_API_URL', value: 'https://other.example.com' },
+        { key: 'KV_REST_API_TOKEN', value: 'tok_x' },
+      ] },
+    ]);
+    const adapter = createDeviceLockAdapter({ token: 't', teamId: 'team_x', storeMode: 'central', transport });
+    const res = await adapter.configureDeviceLock('prj_t1', {
+      kvRestApiUrl: 'https://central.example.com',
+      kvRestApiToken: 'tok_customer_acl_only',
+      appPass: 'accesscode123456',
+    }, 't1');
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error('expected central drift failure');
+    expect(res.reason).toContain('drift');
+    expect(calls.filter((c) => c.method === 'POST').length).toBe(0);
   });
 
   it('Google adapter adds ONLY monitoring.viewer — pre-existing roles preserved, none granted', async () => {
