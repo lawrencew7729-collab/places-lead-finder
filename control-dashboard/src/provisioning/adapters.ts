@@ -10,6 +10,7 @@
  * REAL SANDBOX VERIFIED is the next required dimension (T1 or an explicitly
  * authorized sandbox) before R1 execution. No real provider call is made here.
  */
+import { normalizeKvStoreUrl } from './deviceLockContract';
 
 export interface Transport {
   (url: string, init?: {
@@ -156,12 +157,36 @@ export function createDeviceLockAdapter(options: VercelAdapterOptions): import('
 
   return {
     async configureDeviceLock(projectId, secrets, tenantId) {
-      const pairs: Array<[string, string]> = [
-        ['KV_REST_API_URL', secrets.kvRestApiUrl],
-        ['KV_REST_API_TOKEN', secrets.kvRestApiToken],
-        ['APP_PASS', secrets.appPass],
-        ['CUSTOMER_TENANT_ID', tenantId],
-      ];
+      // Owner correction (2026-08-26): NEVER duplicate an existing store
+      // secret. Read the deployment's current env keys first (names; URL
+      // values are readable for plain-typed vars and are NON-SECRET store
+      // identifiers used for fingerprinting/drift checks only).
+      const envRes = await transport(`${api}/v9/projects/${encodeURIComponent(projectId)}/env?teamId=${encodeURIComponent(options.teamId)}`, { headers: auth() });
+      if (!envRes.ok) return { ok: false, reason: `deviceLock readEnv ${envRes.status}` };
+      const envList = (await envRes.json()) as Array<{ key: string; value?: string | null }>;
+      const valueOf = (key: string): string | null => envList.find((e) => e.key === key)?.value ?? null;
+
+      // Same precedence as api/device.js: KV_REST_API_* preferred, UPSTASH_* fallback.
+      const existingUrl = valueOf('KV_REST_API_URL') ?? valueOf('UPSTASH_REDIS_REST_URL');
+      const existingToken = valueOf('KV_REST_API_TOKEN') ?? valueOf('UPSTASH_REDIS_REST_TOKEN');
+      const storeCredsPresent = Boolean(existingUrl && existingToken);
+
+      const pairs: Array<[string, string]> = [];
+      if (storeCredsPresent) {
+        // Drift guard (belt-and-braces; the DB fingerprint guard also covers
+        // this): when the deployment's store URL is readable, it must match
+        // the transient handoff store. Unreadable (encrypted KV_*) values
+        // are covered by the finalize stage's persisted-fingerprint check.
+        if (existingUrl && normalizeKvStoreUrl(existingUrl) !== normalizeKvStoreUrl(secrets.kvRestApiUrl)) {
+          return { ok: false, reason: 'device policy drift: deployment store differs from handoff store' };
+        }
+      } else {
+        // Fresh deployment: write the canonical pair (api/device.js prefers
+        // KV_REST_API_*). No secret is duplicated for the Upstash-integration
+        // case — UPSTASH_REDIS_REST_* is preferred as-is.
+        pairs.push(['KV_REST_API_URL', secrets.kvRestApiUrl], ['KV_REST_API_TOKEN', secrets.kvRestApiToken]);
+      }
+      pairs.push(['APP_PASS', secrets.appPass], ['CUSTOMER_TENANT_ID', tenantId]);
       for (const [key, value] of pairs) {
         const res = await transport(`${api}/v9/projects/${encodeURIComponent(projectId)}/env?teamId=${encodeURIComponent(options.teamId)}`, {
           method: 'POST',

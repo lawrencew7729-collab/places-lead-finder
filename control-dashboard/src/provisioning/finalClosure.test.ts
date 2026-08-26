@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeEach } from 'vitest';
 import { runProvisioning } from './executor';
 import { createFakeProviders, lastHandedOffPlacesKey } from './provisioningProviders';
-import { createVercelAdapter, createControlPlaneAdapter, createGoogleAdapter, createHealthAdapter, createFakeTransport } from './adapters';
+import { createVercelAdapter, createControlPlaneAdapter, createGoogleAdapter, createHealthAdapter, createDeviceLockAdapter, createFakeTransport } from './adapters';
 import { runtimeEnvPairs, verifyRuntimeEnvConsistency } from './quotaContract';
 import type { GoldenReleaseIdentity } from './releaseRegistry';
 
@@ -201,6 +201,73 @@ describe('R1 final closure — real server-side adapters', () => {
     expect(body.created_by).toBe('op-user-1');
     expect(body.approved_by).toBe('op-user-1');
     expect(body.approved_at).toBe('2026-08-26T00:00:00.000Z');
+  });
+
+  it('device-lock adapter PREFERS existing UPSTASH_REDIS_REST_* — writes ONLY APP_PASS + CUSTOMER_TENANT_ID, no secret duplication', async () => {
+    const { transport, calls } = createFakeTransport([
+      { urlPrefix: '/env', body: [
+        { key: 'UPSTASH_REDIS_REST_URL', value: 'https://store-a.upstash.io' },
+        { key: 'UPSTASH_REDIS_REST_TOKEN', value: 'tok_abcdefghijkl' },
+      ] },
+      { urlPrefix: '/env', body: {} },
+      { urlPrefix: '/env', body: {} },
+    ]);
+    const adapter = createDeviceLockAdapter({ token: 't', teamId: 'team_x', transport });
+    const res = await adapter.configureDeviceLock('prj_t1', {
+      kvRestApiUrl: 'https://store-a.upstash.io',
+      kvRestApiToken: 'tok_abcdefghijkl',
+      appPass: 'accesscode123456',
+    }, '563bfb5f-5ec1-44a8-95b2-2e2ee3e9332b');
+    expect(res.ok).toBe(true);
+    const envGets = calls.filter((c) => c.url.includes('/env') && c.method === 'GET');
+    const envPosts = calls.filter((c) => c.url.includes('/env') && c.method === 'POST');
+    expect(envGets.length).toBe(1); // readback only
+    expect(envPosts.length).toBe(2); // ONLY the missing T1-specific values
+    const keys = envPosts.map((c) => JSON.parse(c.body ?? '{}').key);
+    expect(keys.sort()).toEqual(['APP_PASS', 'CUSTOMER_TENANT_ID']);
+    expect(keys).not.toContain('KV_REST_API_URL');
+    expect(keys).not.toContain('KV_REST_API_TOKEN');
+    expect(envPosts.every((c) => !(c.body ?? '').includes('tok_'))).toBe(true); // token never re-written
+  });
+
+  it('device-lock adapter writes canonical KV_REST_API_* pair ONLY when no store credentials exist', async () => {
+    const { transport, calls } = createFakeTransport([
+      { urlPrefix: '/env', body: [] },
+      { urlPrefix: '/env', body: {} },
+      { urlPrefix: '/env', body: {} },
+      { urlPrefix: '/env', body: {} },
+      { urlPrefix: '/env', body: {} },
+    ]);
+    const adapter = createDeviceLockAdapter({ token: 't', teamId: 'team_x', transport });
+    const res = await adapter.configureDeviceLock('prj_new', {
+      kvRestApiUrl: 'https://store-a.upstash.io',
+      kvRestApiToken: 'tok_abcdefghijkl',
+      appPass: 'accesscode123456',
+    }, 't1');
+    expect(res.ok).toBe(true);
+    const envPosts = calls.filter((c) => c.url.includes('/env') && c.method === 'POST');
+    expect(envPosts.length).toBe(4);
+    const keys = envPosts.map((c) => JSON.parse(c.body ?? '{}').key);
+    expect(keys.sort()).toEqual(['APP_PASS', 'CUSTOMER_TENANT_ID', 'KV_REST_API_TOKEN', 'KV_REST_API_URL']);
+  });
+
+  it('device-lock adapter FAILS on store drift when the deployment store differs from the handoff', async () => {
+    const { transport, calls } = createFakeTransport([
+      { urlPrefix: '/env', body: [
+        { key: 'UPSTASH_REDIS_REST_URL', value: 'https://store-b.upstash.io' },
+        { key: 'UPSTASH_REDIS_REST_TOKEN', value: 'tok_other' },
+      ] },
+    ]);
+    const adapter = createDeviceLockAdapter({ token: 't', teamId: 'team_x', transport });
+    const res = await adapter.configureDeviceLock('prj_t1', {
+      kvRestApiUrl: 'https://store-a.upstash.io',
+      kvRestApiToken: 'tok_abcdefghijkl',
+      appPass: 'accesscode123456',
+    }, 't1');
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error('expected configureDeviceLock to fail');
+    expect(res.reason).toContain('drift');
+    expect(calls.filter((c) => c.method === 'POST').length).toBe(0); // nothing written
   });
 
   it('Google adapter adds ONLY monitoring.viewer — pre-existing roles preserved, none granted', async () => {

@@ -39,10 +39,19 @@ export const DEVICE_LOCK_CONTRACT = Object.freeze({
   accessCodeLength: 16,
 });
 
-/** Server-only env keys written to the customer deployment by the handoff. */
+/**
+ * Server-only env keys of the customer deployment relevant to device lock.
+ * The store credentials may exist under EITHER naming scheme (api/device.js
+ * reads KV_REST_API_* first, UPSTASH_REDIS_REST_* as fallback — same
+ * precedence here). Provisioning writes the canonical KV_REST_API_* pair
+ * ONLY when no store credentials exist yet, and ALWAYS writes APP_PASS +
+ * CUSTOMER_TENANT_ID. No DEVICE_ADMIN_SECRET in the contract.
+ */
 export const DEVICE_LOCK_ENV_KEYS = Object.freeze([
   'KV_REST_API_URL',
   'KV_REST_API_TOKEN',
+  'UPSTASH_REDIS_REST_URL',
+  'UPSTASH_REDIS_REST_TOKEN',
   'APP_PASS',
   'CUSTOMER_TENANT_ID',
 ] as const);

@@ -41,10 +41,12 @@ describe('R1 TWO-DEVICE CONTRACT — contract constants', () => {
     expect(DEVICE_LOCK_CONTRACT.kvKeyNamespace).toBe('lf_dev');
   });
 
-  it('env contract: dedicated store + access code + tenant id; NO DEVICE_ADMIN_SECRET', () => {
+  it('env contract: dedicated store (either naming) + access code + tenant id; NO DEVICE_ADMIN_SECRET', () => {
     expect(DEVICE_LOCK_ENV_KEYS).toEqual([
       'KV_REST_API_URL',
       'KV_REST_API_TOKEN',
+      'UPSTASH_REDIS_REST_URL',
+      'UPSTASH_REDIS_REST_TOKEN',
       'APP_PASS',
       'CUSTOMER_TENANT_ID',
     ]);
