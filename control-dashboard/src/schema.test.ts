@@ -43,3 +43,35 @@ describe('Phase 1 Supabase security contract', () => {
     expect(sql).not.toMatch(/set default\s+(80|95)/);
   });
 });
+
+describe('Migration 008 — red safety-stop default hygiene (owner 2026-08-26)', () => {
+  const safetyStop = () => readFileSync(resolve(process.cwd(), 'supabase/migrations/008_red_safety_stop_default.sql'), 'utf8').toLowerCase();
+  const sums = () => readFileSync(resolve(process.cwd(), 'supabase/migrations/SHA256SUMS'), 'utf8');
+
+  it('changes ONLY red_threshold_percent default 100 -> 95', () => {
+    const sql = safetyStop();
+    expect(sql).toContain('alter column red_threshold_percent set default 95');
+    // no other column/default is touched
+    expect(sql).not.toMatch(/set default (90|100)/);
+    expect(sql).not.toContain('add column');
+    expect(sql).not.toContain('drop column');
+    expect(sql).not.toContain('update public.customer_configurations');
+  });
+
+  it('does NOT rewrite existing tenant rows (T1 stays a separate audited Phase E update)', () => {
+    const sql = safetyStop();
+    expect(sql).not.toMatch(/update\s+public\.customer_configurations/i);
+  });
+
+  it('frozen migrations 005/006/007 checksums are unchanged in SHA256SUMS', () => {
+    const s = sums();
+    expect(s).toContain('474497cb02684eeea75b073c25a41115c3ea669b26581808096129a3efc42c79  005_quota_contract_alignment.sql');
+    expect(s).toContain('1e2b679e82f6e34256f60316001051d326612939dd9eb142d04ef159b9df914d  006_full_fingerprint_contract.sql');
+    expect(s).toContain('a451d2014014cc398e1a4aa86522bdb6161560c712f49ad3954ea132f86974a4  007_device_lock_contract.sql');
+  });
+
+  it('008 has a deterministic checksum recorded in SHA256SUMS', () => {
+    const s = sums();
+    expect(s).toContain('4a5cfed05c68fd5065b53d63825b941cdeec0751f9783302e10f4763488d7b17  008_red_safety_stop_default.sql');
+  });
+});

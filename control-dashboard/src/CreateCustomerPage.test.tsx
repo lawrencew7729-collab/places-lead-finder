@@ -104,11 +104,11 @@ describe('PRE-R1 Create Customer page', () => {
     expect(screen.getByText('Shared Monitoring')).toBeVisible();
   });
 
-  it('13. 1000 / 900 / 1000 defaults are displayed', () => {
+  it('13. 1000 / 900 / 950 defaults are displayed (SAFETY STOP)', () => {
     renderPage();
     expect(screen.getByTestId('default-monthly-limit')).toHaveTextContent('1,000');
     expect(screen.getByTestId('default-amber')).toHaveTextContent('900');
-    expect(screen.getByTestId('default-red')).toHaveTextContent('1,000');
+    expect(screen.getByTestId('default-red')).toHaveTextContent('950');
   });
 
   it('15. CREATE CUSTOMER remains fail-closed PRE-R1', async () => {

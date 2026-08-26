@@ -412,9 +412,9 @@ export function CreateCustomerPage({
               <span>90% of limit</span>
             </div>
             <div>
-              <small>RED</small>
-              <strong data-testid="default-red">1,000</strong>
-              <span>100% of limit</span>
+              <small>RED · SAFETY STOP</small>
+              <strong data-testid="default-red">950</strong>
+              <span>95% of limit — 50-request reserve</span>
             </div>
           </div>
           <button type="button" className="advanced-toggle" onClick={() => setShowAdvanced((current) => !current)}>

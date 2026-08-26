@@ -114,9 +114,9 @@ describe('hosted Supabase audit writer ACL correction', () => {
       },
     ]);
     const names = orderedMigrations();
-    // 007 (R1 TWO-DEVICE CONTRACT device policy) is now the latest migration;
+    // 008 (R1 REVISED SAFETY STOP default) is now the latest migration;
     // the ACL contract itself was fixed in 004 and remains unchanged.
-    expect(names[names.length - 1]).toBe('007_device_lock_contract.sql');
+    expect(names[names.length - 1]).toBe('008_red_safety_stop_default.sql');
     expect(names).toContain('004_fix_audit_function_acl.sql');
     expect(names).toContain('005_quota_contract_alignment.sql');
     expect(names).toContain('006_full_fingerprint_contract.sql');

@@ -1,8 +1,11 @@
 /**
  * R1 readiness — ONE authoritative new-customer quota contract.
  *
- * Approved contract (owner): monthly 1000 · Amber 900 (90%) · Red 1000 (100%)
- * · enforcement disable_new_search.
+ * REVISED owner safety contract (2026-08-26):
+ *   Google monthly allowance 1000 ALL Places API (New) requests
+ *   AMBER 900 (90%) · HARD SAFETY STOP 950 (95%) · reserved buffer 50
+ *   · enforcement disable_new_search at 950.
+ * The 950–1000 range is a permanent safety reserve, NOT customer-usable.
  *
  * Source of truth: Control Plane `customer_configurations` row (explicit
  * values, never schema defaults). Propagation: per-customer deployment ENV
@@ -14,10 +17,10 @@ import { createQuotaPolicy, type Signal } from '../domain';
 export const QUOTA_CONTRACT = Object.freeze({
   monthlyTarget: 1000,
   amberPercent: 90,
-  redPercent: 100,
+  redPercent: 95,
   enforcementMode: 'disable_new_search' as const,
   amberRequests: 900,
-  redRequests: 1000,
+  redRequests: 950,
 });
 
 export interface RuntimeQuotaConfig {
@@ -66,7 +69,7 @@ export function explicitProvisioningQuota() {
   };
 }
 
-/** Signal for display: red at 1000, amber at 900. */
+/** Signal for display: red (safety stop) at 950, amber at 900. */
 export function quotaSignal(used: number): Signal {
   if (!Number.isFinite(used) || used < 0) return 'unknown';
   if (used >= QUOTA_CONTRACT.redRequests) return 'red';
