@@ -12,6 +12,13 @@ const GOLDEN: GoldenReleaseIdentity = {
   status: 'approved',
 };
 
+// R1 TWO-DEVICE CONTRACT — per-customer handoff secrets (transient, first run)
+const DEVICE_LOCK_SECRETS = {
+  kvRestApiUrl: 'https://store-a.upstash.io',
+  kvRestApiToken: 'tok_abcdefghijkl',
+  appPass: 'accesscode123456',
+};
+
 const RAW_KEY = 'AIzaSyBR_pqYgLQ8qVvz1O3cB4Wx7yZ123456789abcdefg';
 
 function input(overrides: Record<string, unknown> = {}) {
@@ -30,7 +37,7 @@ function input(overrides: Record<string, unknown> = {}) {
 describe('R1 security — raw Places key never enters persistence', () => {
   it('executor refuses a raw AIza… key at the tenant stage', async () => {
     const providers = createFakeProviders();
-    const result = await runProvisioning(providers, input({ placesKeyFingerprint: RAW_KEY }));
+    const result = await runProvisioning(providers, input({ placesKeyFingerprint: RAW_KEY }), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
     expect(result.outcome).toBe('FAILED');
     expect(result.failedStageId).toBe('tenant');
     expect(result.stages[0].detail).toContain('raw key refused');
@@ -38,7 +45,7 @@ describe('R1 security — raw Places key never enters persistence', () => {
 
   it('raw key never appears in any stage detail or audit detail', async () => {
     const providers = createFakeProviders();
-    const result = await runProvisioning(providers, input());
+    const result = await runProvisioning(providers, input(), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
     expect(result.outcome).toBe('CUSTOMER_READY');
     const allText = JSON.stringify({ stages: result.stages, rollback: result.rollbackMetadata });
     expect(allText).not.toContain('AIza');
@@ -46,7 +53,7 @@ describe('R1 security — raw Places key never enters persistence', () => {
 
   it('persisted config path only ever carries the 8-hex fingerprint', async () => {
     const providers = createFakeProviders();
-    const result = await runProvisioning(providers, input());
+    const result = await runProvisioning(providers, input(), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
     const readback = await providers.controlPlane.findConfigByTenant(result.tenantId);
     expect(readback.ok).toBe(true);
     expect(readback.config?.keyFingerprint).toBe('AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
@@ -57,7 +64,7 @@ describe('R1 security — raw Places key never enters persistence', () => {
   it('provisioning rejects raw-key-shaped inputs even with a valid fingerprint prefix', async () => {
     // fingerprint must be EXACTLY 8 hex chars — longer/raw values are refused
     const providers = createFakeProviders();
-    const result = await runProvisioning(providers, input({ placesKeyFingerprint: RAW_KEY.slice(0, 10) }));
+    const result = await runProvisioning(providers, input({ placesKeyFingerprint: RAW_KEY.slice(0, 10) }), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
     expect(result.outcome).toBe('FAILED');
   });
 });

@@ -1,5 +1,5 @@
 /**
- * R1 readiness — real provisioning executor (10 stages).
+ * R1 readiness + TWO-DEVICE CONTRACT — real provisioning executor (11 stages).
  *
  * FAIL-CLOSED: requires a separately authorized R1 execution gate. Until then
  * the public surface keeps CUSTOMER_PROVISIONING_NOT_AUTHORIZED and this
@@ -12,17 +12,27 @@
  *  - preserve successfully-created resources
  *  - tenant-specific rollback metadata
  *  - ONE CUSTOMER PROBLEM ≠ ALL CUSTOMER PROBLEM (no fleet-wide action)
+ *  - device-lock readiness verified before CUSTOMER READY (fail-closed):
+ *    every NEW customer deployment must report locked mode with
+ *    MAX_DEVICES = 2 (two-device contract) or provisioning stops.
  */
-import { generateTenantId } from '../domain';
 import { verifyGoldenRelease, type GoldenReleaseIdentity } from './releaseRegistry';
 import { explicitProvisioningQuota, runtimeEnvPairs, verifyQuotaConsistency, verifyRuntimeEnvConsistency, type RuntimeQuotaConfig } from './quotaContract';
+import {
+  devicePolicyFor,
+  kvStoreFingerprint,
+  verifyDeviceLockPolicy,
+  verifyDeviceLockProbe,
+  verifyDeviceLockSecrets,
+  type DeviceLockSecretsInput,
+} from './deviceLockContract';
 import type { ProvisioningProviders } from './provisioningProviders';
 
 export const EXECUTION_GATE_REQUIRED = 'CUSTOMER_PROVISIONING_NOT_AUTHORIZED';
 
 export type StageId =
   | 'tenant' | 'vercel' | 'deploy' | 'domain' | 'places_key'
-  | 'restriction' | 'monitoring' | 'quota' | 'health' | 'finalize';
+  | 'restriction' | 'monitoring' | 'quota' | 'health' | 'device_lock' | 'finalize';
 
 export type StageStatus = 'PENDING' | 'RUNNING' | 'PASS' | 'FAILED' | 'SKIPPED';
 
@@ -44,9 +54,10 @@ export interface ProvisioningInput {
   executionGate: boolean; // must be true (separately authorized R1 gate)
 }
 
-/** Transient inputs consumed at Stage 5 ONLY and discarded — never serialized. */
+/** Transient inputs consumed at their stage ONLY and discarded — never serialized. */
 export interface ProvisioningTransientInput {
-  placesApiKey?: string; // raw browser-visible Places key (ephemeral)
+  placesApiKey?: string; // raw browser-visible Places key (ephemeral, Stage 5)
+  deviceLockSecrets?: DeviceLockSecretsInput; // privileged device-lock secrets (ephemeral, Stage 11)
 }
 
 export interface ProvisioningResult {
@@ -58,7 +69,7 @@ export interface ProvisioningResult {
   rollbackMetadata: { tenantId: string; resourceIds: Record<string, string>; createdAt: string };
 }
 
-const STAGE_ORDER: StageId[] = ['tenant', 'vercel', 'deploy', 'domain', 'places_key', 'restriction', 'monitoring', 'quota', 'health', 'finalize'];
+const STAGE_ORDER: StageId[] = ['tenant', 'vercel', 'deploy', 'domain', 'places_key', 'restriction', 'monitoring', 'quota', 'health', 'device_lock', 'finalize'];
 
 function initialStages(): StageRecord[] {
   return STAGE_ORDER.map((id) => ({ id, status: 'PENDING', detail: 'Not started' }));
@@ -70,9 +81,12 @@ export async function runProvisioning(
   transient: ProvisioningTransientInput = {},
 ): Promise<ProvisioningResult> {
   const stages = initialStages();
-  const tenantId = generateTenantId();
+  // AUTHORITATIVE tenant identity: the Control Plane tenants.id UUID, created
+  // once at the customer identity boundary (stage 1) and reused for every
+  // retry/re-entry. Slug/subdomain are attributes, never the identity.
+  let tenantId = '';
   const hostname = `${input.slug}.leadfinder.business`;
-  const rollbackMetadata = { tenantId, resourceIds: {} as Record<string, string>, createdAt: new Date().toISOString() };
+  const rollbackMetadata = { tenantId: '', resourceIds: {} as Record<string, string>, createdAt: new Date().toISOString() };
 
   if (!input.executionGate) {
     return {
@@ -113,20 +127,30 @@ export async function runProvisioning(
 
   const quota = explicitProvisioningQuota();
 
-  // Stage 1 — validate input + create immutable tenant identity (idempotent).
+  // Stage 1 — validate input + create/reuse the authoritative tenant identity (idempotent).
   const tenantOk = await runStage('tenant', async () => {
     if (!input.companyName.trim() || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(input.slug)) return { ok: false, reason: 'invalid company/slug' };
     // FULL 64-hex uppercase SHA-256 fingerprint required; a raw AIza… key is refused outright
     if (!/^[A-F0-9]{64}$/.test(input.placesKeyFingerprint)) return { ok: false, reason: 'full 64-hex uppercase fingerprint required; raw key refused' };
     const existing = await providers.controlPlane.findTenantBySlug(input.slug);
-    if (existing.ok) return { ok: true, resourceId: existing.resourceId };
-    return providers.controlPlane.insertTenant({
+    if (existing.ok) {
+      tenantId = existing.tenantId ?? '';
+      if (!tenantId) return { ok: false, reason: 'tenant identity unavailable' };
+      return { ok: true, resourceId: tenantId };
+    }
+    const created = await providers.controlPlane.insertTenant({
       companyName: input.companyName.trim(),
       slug: input.slug,
       hostname,
       googleProjectId: input.googleProjectId.trim(),
       keyFingerprint: input.placesKeyFingerprint,
     });
+    if (created.ok) {
+      tenantId = created.resourceId ?? '';
+      if (!tenantId) return { ok: false, reason: 'tenant identity unavailable' };
+      rollbackMetadata.tenantId = tenantId;
+    }
+    return created;
   });
   if (!tenantOk) return finish(providers, tenantId, hostname, stages, rollbackMetadata);
 
@@ -194,8 +218,62 @@ export async function runProvisioning(
   const healthOk = await runStage('health', () => providers.health.smokeCheck(hostname));
   if (!healthOk) return finish(providers, tenantId, hostname, stages, rollbackMetadata);
 
-  // Stage 10 — persist safe customer config + finalize Control Plane record.
+  // Stage 10 (two-device contract) — device-lock readiness, FAIL-CLOSED.
+  // CUSTOMER READY is unreachable unless the deployed customer app reports
+  // locked mode with exactly MAX_DEVICES = 2 on its OWN dedicated KV store,
+  // with the immutable CUSTOMER_TENANT_ID and customer access code configured.
+  // Privileged device-lock secrets are consumed via the EPHEMERAL handoff
+  // here and discarded — they never enter stages/rollback/audit/DB.
+  const deviceLockOk = await runStage('device_lock', async () => {
+    if (!providers.deviceLock) {
+      return { ok: false, reason: 'device-lock provider required (fail-closed: device policy must be verified)' };
+    }
+    if (transient.deviceLockSecrets) {
+      const secretsOk = verifyDeviceLockSecrets(transient.deviceLockSecrets);
+      if (!secretsOk.consistent) return { ok: false, reason: `device-lock secrets invalid: ${secretsOk.reasons.join('; ')}` };
+      // dedicated-store uniqueness guard (D4): no SECOND tenant may own the same store
+      const fingerprint = kvStoreFingerprint(transient.deviceLockSecrets.kvRestApiUrl);
+      const owner = await providers.controlPlane.findByStoreFingerprint(fingerprint);
+      if (owner.ok && owner.tenantId !== tenantId) {
+        return { ok: false, reason: 'dedicated KV store already owned by another tenant' };
+      }
+      const handoff = await providers.deviceLock.configureDeviceLock(projectId, transient.deviceLockSecrets, tenantId);
+      if (!handoff.ok) return handoff;
+    }
+    // bounded read-only probe: booleans only, no secret values
+    const probeRes = await providers.deviceLock.verifyDeviceLock(hostname);
+    if (!probeRes.ok) return probeRes;
+    const check = verifyDeviceLockProbe(probeRes.probe ?? null);
+    if (!check.consistent) return { ok: false, reason: `device policy verification failed: ${check.reasons.join('; ')}` };
+    return { ok: true, resourceId: hostname };
+  });
+  if (!deviceLockOk) return finish(providers, tenantId, hostname, stages, rollbackMetadata);
+
+  // Stage 11 — persist safe customer config + finalize Control Plane record.
   const finalizeOk = await runStage('finalize', async () => {
+    const runtime: RuntimeQuotaConfig = { monthlyTarget: quota.monthlyTarget, amberPercent: quota.amberPercent, redPercent: quota.redPercent, enforcementMode: quota.enforcementMode };
+    // non-secret store fingerprint (full 64-hex) — raw KV URL/token NEVER persisted
+    const storeFingerprint = transient.deviceLockSecrets
+      ? kvStoreFingerprint(transient.deviceLockSecrets.kvRestApiUrl)
+      : null;
+
+    // idempotent re-provision: an existing, contract-consistent record is reused
+    const existing = await providers.controlPlane.findConfigByTenant(tenantId);
+    if (existing.ok && existing.config) {
+      if (storeFingerprint !== null && existing.config.devicePolicy.storeFingerprint !== storeFingerprint) {
+        return { ok: false, reason: 'device policy drift: store fingerprint changed for an existing tenant' };
+      }
+      const q = verifyQuotaConsistency(runtime, existing.config.quota);
+      const p = verifyDeviceLockPolicy(existing.config.devicePolicy);
+      if (!q.consistent || !p.consistent) {
+        return { ok: false, reason: `persisted config mismatch: ${[...q.reasons, ...p.reasons].join('; ')}` };
+      }
+      return { ok: true, resourceId: tenantId }; // already provisioned — idempotent
+    }
+    if (storeFingerprint === null) {
+      return { ok: false, reason: 'store fingerprint unavailable for a new record' };
+    }
+
     const configResult = await providers.controlPlane.insertCustomerConfig({
       tenantId,
       googleProjectId: input.googleProjectId.trim(),
@@ -203,14 +281,18 @@ export async function runProvisioning(
       websiteRestrictionExact: restriction,
       monitoringMode: 'shared_access',
       quota: { monthlyTarget: quota.monthlyTarget, amberPercent: quota.amberPercent, redPercent: quota.redPercent, enforcementMode: quota.enforcementMode },
+      // non-secret device policy metadata (no KV creds / access code / secrets)
+      devicePolicy: devicePolicyFor(tenantId, storeFingerprint),
     });
     if (!configResult.ok) return configResult;
     // post-insert read-back: persisted config must agree with the runtime contract
     const readback = await providers.controlPlane.findConfigByTenant(tenantId);
     const persisted = readback.ok && readback.config ? readback.config.quota : null;
-    const runtime: RuntimeQuotaConfig = { monthlyTarget: quota.monthlyTarget, amberPercent: quota.amberPercent, redPercent: quota.redPercent, enforcementMode: quota.enforcementMode };
     const check = verifyQuotaConsistency(runtime, persisted);
     if (!check.consistent) return { ok: false, reason: `persisted quota mismatch: ${check.reasons.join('; ')}` };
+    // device policy read-back must also match the two-device contract exactly
+    const policyCheck = verifyDeviceLockPolicy(readback.ok && readback.config ? readback.config.devicePolicy : null);
+    if (!policyCheck.consistent) return { ok: false, reason: `persisted device policy mismatch: ${policyCheck.reasons.join('; ')}` };
     await providers.controlPlane.insertAudit({ tenantId, action: 'CUSTOMER_PROVISIONED', detail: `slug=${input.slug}` });
     return { ok: true, resourceId: tenantId };
   });

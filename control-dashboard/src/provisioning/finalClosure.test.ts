@@ -17,6 +17,13 @@ const GOLDEN: GoldenReleaseIdentity = {
   status: 'approved',
 };
 
+// R1 TWO-DEVICE CONTRACT — per-customer handoff secrets (transient, first run)
+const DEVICE_LOCK_SECRETS = {
+  kvRestApiUrl: 'https://store-a.upstash.io',
+  kvRestApiToken: 'tok_abcdefghijkl',
+  appPass: 'accesscode123456',
+};
+
 function input() {
   return {
     companyName: 'ABC Trading Sdn Bhd',
@@ -32,7 +39,7 @@ function input() {
 describe('R1 final closure — full fingerprint contract', () => {
   it('persists exactly 64 uppercase hex characters', async () => {
     const providers = createFakeProviders();
-    const result = await runProvisioning(providers, input());
+    const result = await runProvisioning(providers, input(), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
     const readback = await providers.controlPlane.findConfigByTenant(result.tenantId);
     expect(readback.config?.keyFingerprint).toMatch(/^[A-F0-9]{64}$/);
     expect(readback.config?.keyFingerprint.length).toBe(64);
@@ -40,7 +47,7 @@ describe('R1 final closure — full fingerprint contract', () => {
 
   it('refuses truncated 8-hex fingerprints (must be full 64)', async () => {
     const providers = createFakeProviders();
-    const result = await runProvisioning(providers, input().placesKeyFingerprint ? { ...input(), placesKeyFingerprint: '1A2B3C4D' } : input());
+    const result = await runProvisioning(providers, input().placesKeyFingerprint ? { ...input(), placesKeyFingerprint: '1A2B3C4D' } : input(), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
     expect(result.outcome).toBe('FAILED');
     expect(result.failedStageId).toBe('tenant');
   });
@@ -53,7 +60,7 @@ describe('R1 final closure — transient raw key handoff', () => {
 
   it('stage 5 consumes the raw key via the ephemeral handoff and discards it', async () => {
     const providers = createFakeProviders();
-    const result = await runProvisioning(providers, input(), { placesApiKey: RAW_KEY });
+    const result = await runProvisioning(providers, input(), { placesApiKey: RAW_KEY, deviceLockSecrets: DEVICE_LOCK_SECRETS });
     expect(result.outcome).toBe('CUSTOMER_READY');
     expect(lastHandedOffPlacesKey()).toBe(RAW_KEY);
     // raw key never enters serializable state
@@ -63,7 +70,7 @@ describe('R1 final closure — transient raw key handoff', () => {
 
   it('raw key never enters DB/audit/rollback even when handed off', async () => {
     const providers = createFakeProviders();
-    const result = await runProvisioning(providers, input(), { placesApiKey: RAW_KEY });
+    const result = await runProvisioning(providers, input(), { placesApiKey: RAW_KEY, deviceLockSecrets: DEVICE_LOCK_SECRETS });
     const readback = await providers.controlPlane.findConfigByTenant(result.tenantId);
     expect(JSON.stringify(readback.config)).not.toContain('AIza');
     expect(JSON.stringify(result.rollbackMetadata)).not.toContain('AIza');
@@ -148,6 +155,15 @@ describe('R1 final closure — real server-side adapters', () => {
       websiteRestrictionExact: 'https://abc.leadfinder.business/*',
       monitoringMode: 'shared_access',
       quota: { monthlyTarget: 1000, amberPercent: 90, redPercent: 100, enforcementMode: 'disable_new_search' },
+      devicePolicy: {
+        maxDevices: 2,
+        mode: 'hard_lock',
+        kvNamespace: 'lf_dev:t1',
+        appPassConfigured: true,
+        tenantIdConfigured: true,
+        autoEviction: false,
+        storeFingerprint: 'B'.repeat(64),
+      },
     });
     expect(res.ok).toBe(true);
     const body = JSON.parse(calls[0].body ?? '{}');

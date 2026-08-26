@@ -139,6 +139,63 @@ export function createVercelAdapter(options: VercelAdapterOptions): import('./pr
 }
 
 // ---------------------------------------------------------------------------
+// DEVICE-LOCK adapter (R1 TWO-DEVICE CONTRACT)
+//   - configureDeviceLock: EPHEMERAL secret handoff — writes the customer's
+//     dedicated-store credentials (KV_REST_API_URL/TOKEN), customer access
+//     code (APP_PASS) and immutable CUSTOMER_TENANT_ID to the isolated
+//     Vercel project, then the raw values are discarded by the caller.
+//     NEVER persisted/logged. No DEVICE_ADMIN_SECRET in the R1 contract.
+//   - verifyDeviceLock: bounded read-only HTTPS probe of the deployed
+//     customer app (/api/device?mode=probe) — booleans only, no secrets.
+// ---------------------------------------------------------------------------
+
+export function createDeviceLockAdapter(options: VercelAdapterOptions): import('./provisioningProviders').DeviceLockProvider {
+  const transport = options.transport ?? nodeFetchTransport();
+  const auth = (extra: Record<string, string> = {}) => ({ Authorization: `Bearer ${options.token}`, 'Content-Type': 'application/json', ...extra });
+  const api = `https://api.vercel.com`;
+
+  return {
+    async configureDeviceLock(projectId, secrets, tenantId) {
+      const pairs: Array<[string, string]> = [
+        ['KV_REST_API_URL', secrets.kvRestApiUrl],
+        ['KV_REST_API_TOKEN', secrets.kvRestApiToken],
+        ['APP_PASS', secrets.appPass],
+        ['CUSTOMER_TENANT_ID', tenantId],
+      ];
+      for (const [key, value] of pairs) {
+        const res = await transport(`${api}/v9/projects/${encodeURIComponent(projectId)}/env?teamId=${encodeURIComponent(options.teamId)}`, {
+          method: 'POST',
+          headers: auth(),
+          body: JSON.stringify({ key, value, target: ['production'], type: 'encrypted' }),
+        });
+        if (!res.ok) return { ok: false, reason: `deviceLock setEnv ${key} ${res.status}` };
+      }
+      return { ok: true, resourceId: projectId };
+    },
+
+    async verifyDeviceLock(hostname) {
+      const res = await transport(`https://${hostname}/api/device?mode=probe`, {});
+      if (!res.ok) return { ok: false, reason: `deviceLock probe ${res.status}` };
+      const body = (await res.json()) as Record<string, unknown>;
+      if (body.mode !== 'locked' && body.mode !== 'open' && body.mode !== 'unconfigured') {
+        return { ok: false, reason: 'unexpected probe shape' };
+      }
+      return {
+        ok: true,
+        resourceId: hostname,
+        probe: {
+          mode: body.mode,
+          maxDevices: Number(body.maxDevices),
+          kvConfigured: body.kvConfigured === true,
+          appPassConfigured: body.appPassConfigured === true,
+          tenantIdConfigured: body.tenantIdConfigured === true,
+        },
+      };
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // CONTROL PLANE (Supabase PostgREST) adapter — server-side service role
 // ---------------------------------------------------------------------------
 
@@ -155,7 +212,8 @@ export function createControlPlaneAdapter(options: ControlPlaneAdapterOptions): 
 
   return {
     async insertTenant(input) {
-      const res = await transport(`${api}/tenants`, { method: 'POST', headers, body: JSON.stringify({
+      // return=representation: read back the DB-generated authoritative tenant UUID
+      const res = await transport(`${api}/tenants`, { method: 'POST', headers: { ...headers, Prefer: 'return=representation' }, body: JSON.stringify({
         company_name: input.companyName,
         slug: input.slug,
         exact_subdomain: input.hostname,
@@ -163,7 +221,10 @@ export function createControlPlaneAdapter(options: ControlPlaneAdapterOptions): 
         created_by: '00000000-0000-0000-0000-000000000000', // replaced by server layer with the operator id
       }) });
       if (!res.ok) return { ok: false, reason: `cp insertTenant ${res.status}` };
-      return { ok: true, resourceId: input.hostname };
+      const rows = (await res.json()) as Array<{ id?: string }>;
+      const id = rows[0]?.id;
+      if (!id) return { ok: false, reason: 'cp insertTenant missing tenant id' };
+      return { ok: true, resourceId: id };
     },
 
     async insertCustomerConfig(config) {
@@ -178,6 +239,13 @@ export function createControlPlaneAdapter(options: ControlPlaneAdapterOptions): 
         amber_threshold_percent: config.quota.amberPercent,
         red_threshold_percent: config.quota.redPercent,
         quota_enforcement_mode: config.quota.enforcementMode,
+        // R1 TWO-DEVICE CONTRACT — non-secret device policy metadata (no secrets);
+        // device_limit is the migration-001 column (check tightened to = 2 in 007)
+        device_limit: config.devicePolicy.maxDevices,
+        device_lock_mode: config.devicePolicy.mode,
+        device_kv_namespace: config.devicePolicy.kvNamespace,
+        device_store_fingerprint: config.devicePolicy.storeFingerprint,
+        device_app_pass_configured: config.devicePolicy.appPassConfigured,
         updated_by: '00000000-0000-0000-0000-000000000000',
       }) });
       if (!res.ok) return { ok: false, reason: `cp insertCustomerConfig ${res.status}` };
@@ -213,11 +281,12 @@ export function createControlPlaneAdapter(options: ControlPlaneAdapterOptions): 
       if (!res.ok) return { ok: false, reason: `cp findTenantBySlug ${res.status}` };
       const rows = (await res.json()) as Array<{ id: string; exact_subdomain: string }>;
       if (rows.length === 0) return { ok: false, reason: 'not found' };
-      return { ok: true, resourceId: rows[0].exact_subdomain, tenantId: rows[0].exact_subdomain };
+      // the authoritative tenant identity is the row's UUID — slug/subdomain are attributes
+      return { ok: true, resourceId: rows[0].id, tenantId: rows[0].id };
     },
 
     async findConfigByTenant(tenantId) {
-      const res = await transport(`${api}/customer_configurations?tenant_id=eq.${tenantId}&select=monthly_usage_target,amber_threshold_percent,red_threshold_percent,quota_enforcement_mode`, { headers });
+      const res = await transport(`${api}/customer_configurations?tenant_id=eq.${tenantId}&select=monthly_usage_target,amber_threshold_percent,red_threshold_percent,quota_enforcement_mode,device_limit,device_lock_mode,device_kv_namespace,device_store_fingerprint,device_app_pass_configured`, { headers });
       if (!res.ok) return { ok: false, reason: `cp findConfigByTenant ${res.status}` };
       const rows = (await res.json()) as Array<Record<string, unknown>>;
       if (rows.length === 0) return { ok: false, reason: 'not found' };
@@ -234,8 +303,25 @@ export function createControlPlaneAdapter(options: ControlPlaneAdapterOptions): 
           redPercent: Number(row.red_threshold_percent),
           enforcementMode: row.quota_enforcement_mode as 'warn_only' | 'disable_new_search',
         },
+        devicePolicy: {
+          maxDevices: Number(row.device_limit),
+          mode: 'hard_lock',
+          kvNamespace: String(row.device_kv_namespace ?? ''),
+          appPassConfigured: row.device_app_pass_configured === true,
+          tenantIdConfigured: true, // tenant_id IS the authoritative identity (FK/PK)
+          autoEviction: false,
+          storeFingerprint: String(row.device_store_fingerprint ?? ''),
+        },
       };
       return { ok: true, config, resourceId: tenantId };
+    },
+
+    async findByStoreFingerprint(fingerprint) {
+      const res = await transport(`${api}/customer_configurations?device_store_fingerprint=eq.${encodeURIComponent(fingerprint)}&select=tenant_id`, { headers });
+      if (!res.ok) return { ok: false, reason: `cp findByStoreFingerprint ${res.status}` };
+      const rows = (await res.json()) as Array<{ tenant_id: string }>;
+      if (rows.length === 0) return { ok: false, reason: 'not found' };
+      return { ok: true, tenantId: rows[0].tenant_id, resourceId: rows[0].tenant_id };
     },
   };
 }

@@ -130,11 +130,25 @@ describe('PRE-R1 Create Customer page', () => {
     const user = userEvent.setup();
     renderPage();
     const list = screen.getByTestId('run-sheet-list');
-    expect(list.children).toHaveLength(10);
-    expect(screen.getAllByText('PENDING').length).toBe(10);
+    expect(list.children).toHaveLength(11);
+    expect(screen.getAllByText('PENDING').length).toBe(11);
     await user.click(screen.getByRole('button', { name: /preview run sheet/i }));
     // first stage flips to RUNNING synchronously
     expect(await screen.findByText('Running…')).toBeVisible();
+  });
+
+  it('16b. access code: generated per customer, copyable, transient UI state only', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    expect(screen.queryByTestId('access-code-value')).not.toBeInTheDocument();
+    await user.click(screen.getByTestId('generate-access-code'));
+    const firstCode = screen.getByTestId('access-code-value').textContent ?? '';
+    expect(firstCode).toHaveLength(16);
+    expect(screen.getByTestId('copy-access-code')).toBeVisible();
+    // two generations differ (capture the value BEFORE re-render mutates the node)
+    await user.click(screen.getByTestId('generate-access-code'));
+    const secondCode = screen.getByTestId('access-code-value').textContent ?? '';
+    expect(secondCode).not.toBe(firstCode);
   });
 
   it('17. no real provisioning mutation is possible', async () => {

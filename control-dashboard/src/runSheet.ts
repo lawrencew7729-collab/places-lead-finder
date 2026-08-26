@@ -16,6 +16,7 @@ export type RunSheetStageId =
   | 'monitoring'
   | 'quota'
   | 'health'
+  | 'device_lock'
   | 'finalize';
 
 export interface RunSheetStage {
@@ -35,6 +36,7 @@ export const RUN_SHEET_STAGES: readonly { id: RunSheetStageId; label: string }[]
   { id: 'monitoring', label: 'Connect Shared Monitoring' },
   { id: 'quota', label: 'Verify monthly quota policy' },
   { id: 'health', label: 'Run health / smoke checks' },
+  { id: 'device_lock', label: 'Verify device access policy' },
   { id: 'finalize', label: 'Finalize Control Plane customer record' },
 ]);
 
@@ -72,6 +74,7 @@ export const RUN_SHEET_SUCCESS_DETAILS: Record<RunSheetStageId, string> = Object
   monitoring: 'Shared Monitoring connected',
   quota: 'Quota policy 1000 / 900 / 1000 verified',
   health: 'Health checks passed',
+  device_lock: 'DEVICE ACCESS POLICY VERIFIED — 2 DEVICE LIMIT ACTIVE',
   finalize: 'Customer record finalized',
 });
 

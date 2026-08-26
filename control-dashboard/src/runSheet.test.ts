@@ -4,9 +4,9 @@ import { advanceRunSheet, createRunSheet, runSheetState, RUN_SHEET_STAGES, skipR
 describe('runSheet — deterministic mock state model', () => {
   it('starts with all PENDING stages', () => {
     const stages = createRunSheet();
-    expect(stages).toHaveLength(10);
+    expect(stages).toHaveLength(11);
     expect(RUN_SHEET_STAGES.map((stage) => stage.id)).toEqual([
-      'tenant', 'vercel', 'deploy', 'domain', 'places_key', 'restriction', 'monitoring', 'quota', 'health', 'finalize',
+      'tenant', 'vercel', 'deploy', 'domain', 'places_key', 'restriction', 'monitoring', 'quota', 'health', 'device_lock', 'finalize',
     ]);
     expect(stages.every((stage) => stage.status === 'PENDING')).toBe(true);
     expect(runSheetState(stages).outcome).toBe('IN_PROGRESS');
@@ -24,12 +24,20 @@ describe('runSheet — deterministic mock state model', () => {
     expect(stages[2].status).toBe('RUNNING');
   });
 
-  it('reaches CUSTOMER_READY after all ten stages pass', () => {
+  it('reaches CUSTOMER_READY after all eleven stages pass', () => {
     let stages = createRunSheet();
     for (let i = 0; i < 20; i += 1) stages = advanceRunSheet(stages);
     expect(stages.every((stage) => stage.status === 'PASS')).toBe(true);
     expect(runSheetState(stages).outcome).toBe('CUSTOMER_READY');
     expect(runSheetState(stages).failedStageId).toBeNull();
+  });
+
+  it('records the device access policy success detail (2 DEVICE LIMIT ACTIVE)', () => {
+    let stages = createRunSheet();
+    for (let i = 0; i < 12; i += 1) stages = advanceRunSheet(stages);
+    const device = stages.find((s) => s.id === 'device_lock');
+    expect(device?.status).toBe('PASS');
+    expect(device?.detail).toBe('DEVICE ACCESS POLICY VERIFIED — 2 DEVICE LIMIT ACTIVE');
   });
 
   it('records successful stage details', () => {
@@ -54,7 +62,7 @@ describe('runSheet — deterministic mock state model', () => {
     for (let i = 0; i < 4; i += 1) stages = advanceRunSheet(stages);
     stages = skipRunSheetFrom(stages, 'monitoring');
     expect(stages[6].status).toBe('SKIPPED');
-    expect(stages[9].status).toBe('SKIPPED');
+    expect(stages[10].status).toBe('SKIPPED');
     expect(stages[0].status).toBe('PASS');
     expect(runSheetState(stages).outcome).toBe('IN_PROGRESS');
   });

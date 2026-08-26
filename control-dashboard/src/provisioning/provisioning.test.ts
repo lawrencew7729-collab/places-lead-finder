@@ -13,6 +13,13 @@ const GOLDEN: GoldenReleaseIdentity = {
   status: 'approved',
 };
 
+// R1 TWO-DEVICE CONTRACT — per-customer handoff secrets (transient, first run)
+const DEVICE_LOCK_SECRETS = {
+  kvRestApiUrl: 'https://store-a.upstash.io',
+  kvRestApiToken: 'tok_abcdefghijkl',
+  appPass: 'accesscode123456',
+};
+
 function input(overrides: Partial<Parameters<typeof runProvisioning>[1]> = {}) {
   return {
     companyName: 'ABC Trading Sdn Bhd',
@@ -103,19 +110,19 @@ describe('R1 Golden Standard registry', () => {
 });
 
 describe('R1 provisioning executor', () => {
-  it('executes all 10 stages to CUSTOMER_READY with the approved contract', async () => {
+  it('executes all 11 stages to CUSTOMER_READY with the approved contract', async () => {
     const providers = createFakeProviders();
-    const result = await runProvisioning(providers, input());
+    const result = await runProvisioning(providers, input(), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
     expect(result.outcome).toBe('CUSTOMER_READY');
     expect(result.failedStageId).toBeNull();
-    expect(result.stages).toHaveLength(10);
+    expect(result.stages).toHaveLength(11);
     expect(result.stages.every((s) => s.status === 'PASS')).toBe(true);
     expect(result.rollbackMetadata.resourceIds.vercel).toBe('prj_fake_abc');
     expect(result.rollbackMetadata.resourceIds.domain).toBe('abc.leadfinder.business');
   });
 
   it('fails closed when the R1 execution gate is not granted', async () => {
-    const result = await runProvisioning(createFakeProviders(), input({ executionGate: false }));
+    const result = await runProvisioning(createFakeProviders(), input({ executionGate: false }), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
     expect(result.outcome).toBe('FAILED');
     expect(result.failedStageId).toBe('tenant');
     expect(result.stages[0].detail).toBe(EXECUTION_GATE_REQUIRED);
@@ -130,7 +137,7 @@ describe('R1 provisioning executor', () => {
 
   it('stops on failure and preserves earlier PASS stages', async () => {
     const providers = createFakeProviders({ failAt: ['vercel.deployGolden'] });
-    const result = await runProvisioning(providers, input());
+    const result = await runProvisioning(providers, input(), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
     expect(result.outcome).toBe('FAILED');
     expect(result.failedStageId).toBe('deploy');
     expect(result.stages[0].status).toBe('PASS'); // tenant preserved
@@ -138,34 +145,37 @@ describe('R1 provisioning executor', () => {
     expect(result.stages[2].status).toBe('FAILED');
     // stages after failure remain PENDING (no forward execution)
     expect(result.stages.slice(3).every((s) => s.status === 'PENDING')).toBe(true);
+    // device_lock stage sits between health and finalize
+    expect(result.stages[9].id).toBe('device_lock');
+    expect(result.stages[10].id).toBe('finalize');
   });
 
   it('retries only the failed stage and resumes (idempotent find-before-create)', async () => {
     const providers = createFakeProviders({ failAt: ['vercel.bindDomain'] });
-    const first = await runProvisioning(providers, input());
+    const first = await runProvisioning(providers, input(), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
     expect(first.failedStageId).toBe('domain');
     // retry with the failure removed — tenant/project/deploy already exist (idempotent)
     providers.setFailures([]);
-    const retried = await runProvisioning(providers, input());
+    const retried = await runProvisioning(providers, input(), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
     expect(retried.outcome).toBe('CUSTOMER_READY');
   });
 
   it('never creates duplicate projects on retry', async () => {
     const providers = createFakeProviders({ failAt: ['vercel.bindDomain'] });
-    await runProvisioning(providers, input());
+    await runProvisioning(providers, input(), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
     providers.setFailures([]);
-    await runProvisioning(providers, input());
+    await runProvisioning(providers, input(), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
     providers.setFailures([]);
-    await runProvisioning(providers, input());
+    await runProvisioning(providers, input(), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
     // fake keeps a single project per tenant — no duplicate creation path
-    const result = await runProvisioning(providers, input());
+    const result = await runProvisioning(providers, input(), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
     expect(result.outcome).toBe('CUSTOMER_READY');
   });
 
   it('rejects a domain already bound to another project (isolation)', async () => {
     const providers = createFakeProviders();
-    await runProvisioning(providers, input());
-    const second = await runProvisioning(providers, input({ slug: 'abc' }));
+    await runProvisioning(providers, input(), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
+    const second = await runProvisioning(providers, input({ slug: 'abc' }), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
     // same slug → same hostname; fake returns the existing project (idempotent) — still ONE owner
     expect(second.outcome).toBe('CUSTOMER_READY');
     expect(second.rollbackMetadata.resourceIds.domain).toBe('abc.leadfinder.business');
@@ -174,7 +184,7 @@ describe('R1 provisioning executor', () => {
   it('verifies runtime/persisted quota agreement at stage 8 (fail-closed)', async () => {
     const providers = createFakeProviders({ failAt: ['cp.insertCustomerConfig'] });
     // quota stage runs BEFORE finalize; insertCustomerConfig failure only surfaces at finalize
-    const result = await runProvisioning(providers, input());
+    const result = await runProvisioning(providers, input(), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
     expect(result.outcome).toBe('FAILED');
     expect(result.failedStageId).toBe('finalize');
     // quota stage itself passed (runtime == persisted contract)

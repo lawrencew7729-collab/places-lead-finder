@@ -34,6 +34,7 @@ import {
   type RunSheetStage,
 } from './runSheet';
 import { getSupabaseClient } from './supabase';
+import { generateAccessCode, ACCESS_CODE_LENGTH } from './accessCode';
 
 interface CreateCustomerPageProps {
   /** admin only — the INTERNAL dashboard entry is never rendered for operators */
@@ -86,6 +87,9 @@ export function CreateCustomerPage({
   const [runSheet, setRunSheet] = useState<RunSheetStage[]>(() => createRunSheet());
   const [runSheetPreviewing, setRunSheetPreviewing] = useState(false);
   const runSheetTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  // R1 TWO-DEVICE CONTRACT — customer access code (TRANSIENT UI state only)
+  const [accessCode, setAccessCode] = useState('');
+  const [accessCodeCopied, setAccessCodeCopied] = useState(false);
 
   const slugValid = isValidSlug(slug);
   let url = '';
@@ -150,6 +154,22 @@ export function CreateCustomerPage({
       setTimeout(() => setCopied(false), 2000);
     } catch {
       setVerifyError('Clipboard unavailable — copy the restriction manually.');
+    }
+  }
+
+  function handleGenerateAccessCode() {
+    setAccessCode(generateAccessCode());
+    setAccessCodeCopied(false);
+  }
+
+  async function handleCopyAccessCode() {
+    if (!accessCode) return;
+    try {
+      await navigator.clipboard.writeText(accessCode);
+      setAccessCodeCopied(true);
+      setTimeout(() => setAccessCodeCopied(false), 2000);
+    } catch {
+      setVerifyError('Clipboard unavailable — copy the access code manually.');
     }
   }
 
@@ -341,7 +361,36 @@ export function CreateCustomerPage({
         <section className="panel">
           <header className="panel-header">
             <div>
-              <span>3 · DEFAULTS</span>
+              <span>3 · ACCESS</span>
+              <h2>Customer access code</h2>
+            </div>
+            <KeyRound />
+          </header>
+          <p className="panel-footnote">
+            Authentication for new customers is a {ACCESS_CODE_LENGTH}-character access code (no username). Generate one code per
+            customer, copy it, and deliver it OUT-OF-BAND (manual). The code is transient only — it reaches provisioning as a
+            secret, is injected as the customer&apos;s server-side <code>APP_PASS</code>, and is never persisted to any system of
+            record.
+          </p>
+          <div className="access-code-row">
+            <button type="button" className="primary-button inline-action" onClick={handleGenerateAccessCode} data-testid="generate-access-code">
+              GENERATE ACCESS CODE
+            </button>
+            {accessCode && (
+              <>
+                <code className="access-code-value" data-testid="access-code-value">{accessCode}</code>
+                <button type="button" className="copy-button" onClick={handleCopyAccessCode} data-testid="copy-access-code">
+                  <ClipboardCopy size={14} /> {accessCodeCopied ? 'COPIED' : 'COPY'}
+                </button>
+              </>
+            )}
+          </div>
+        </section>
+
+        <section className="panel">
+          <header className="panel-header">
+            <div>
+              <span>4 · DEFAULTS</span>
               <h2>Monitoring & quota</h2>
             </div>
             <GaugeIcon />
@@ -383,7 +432,7 @@ export function CreateCustomerPage({
         <section className="panel">
           <header className="panel-header">
             <div>
-              <span>4 · VERIFY</span>
+              <span>5 · VERIFY</span>
               <h2>Verify details</h2>
             </div>
             <CheckIcon />
@@ -429,7 +478,7 @@ export function CreateCustomerPage({
         <section className="panel fail-closed-panel">
           <header className="panel-header">
             <div>
-              <span>5 · PROVISION</span>
+              <span>6 · PROVISION</span>
               <h2>Create Customer</h2>
             </div>
             <ShieldCheck />

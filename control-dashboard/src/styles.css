@@ -29,6 +29,8 @@
 .fingerprint-row{display:flex;align-items:center;gap:9px;margin-top:16px;color:#7d949c;font-size:11px}
 .fingerprint-row svg{color:var(--cyan)}
 .fingerprint-row code{color:#b9e9e6;font:500 11px DM Mono,monospace}
+.access-code-row{display:flex;align-items:center;gap:12px;margin-top:16px;flex-wrap:wrap}
+.access-code-value{display:inline-block;padding:10px 14px;border:1px dashed #2a4652;border-radius:9px;background:#0a151b;color:#b9e9e6;font:600 15px DM Mono,monospace;letter-spacing:2px}
 .defaults-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:18px 0}
 .defaults-grid>div{border:1px solid #1d333c;border-radius:9px;background:#0a151b;padding:15px}
 .defaults-grid small,.defaults-grid strong,.defaults-grid span{display:block}

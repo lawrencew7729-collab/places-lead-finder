@@ -15,6 +15,7 @@
  */
 import type { GoldenReleaseIdentity } from './releaseRegistry';
 import type { RuntimeQuotaConfig } from './quotaContract';
+import type { DeviceLockProbe, DeviceLockSecretsInput, DevicePolicy } from './deviceLockContract';
 
 export type ProviderResult = { ok: true; resourceId?: string } | { ok: false; reason: string };
 
@@ -33,6 +34,8 @@ export interface CustomerConfigInput {
   websiteRestrictionExact: string;
   monitoringMode: 'shared_access';
   quota: RuntimeQuotaConfig;
+  /** R1 TWO-DEVICE CONTRACT — non-secret device policy metadata (no secrets). */
+  devicePolicy: DevicePolicy;
 }
 
 export interface RuntimeEnvInput {
@@ -60,6 +63,25 @@ export interface SecretHandoff {
   configurePlacesKey(projectId: string, rawPlacesKey: string): Promise<ProviderResult>;
 }
 
+/**
+ * R1 TWO-DEVICE CONTRACT — device-lock handoff + readiness verification.
+ *
+ * `configureDeviceLock` is an EPHEMERAL secret handoff (device_lock stage
+ * ONLY): it writes the customer-specific privileged device env (dedicated KV
+ * REST credentials, customer access code, immutable CUSTOMER_TENANT_ID) to
+ * the isolated deployment, then the raw values are discarded — they never
+ * enter serializable provisioning state.
+ *
+ * `verifyDeviceLock` is a bounded read-only HTTPS probe against the deployed
+ * customer app (/api/device?mode=probe). It returns BOOLEAN lock state only
+ * (no secret values). CUSTOMER READY is unreachable while this verification
+ * fails (fail-closed).
+ */
+export interface DeviceLockProvider {
+  configureDeviceLock(projectId: string, secrets: DeviceLockSecretsInput, tenantId: string): Promise<ProviderResult>;
+  verifyDeviceLock(hostname: string): Promise<ProviderResult & { probe?: DeviceLockProbe }>;
+}
+
 export interface GoogleProvider {
   verifyReferrer(googleProjectId: string, restrictionExact: string): Promise<ProviderResult>;
   grantMonitoringViewer(googleProjectId: string, centralMonitoringSa: string): Promise<ProviderResult>;
@@ -72,6 +94,8 @@ export interface ControlPlaneProvider {
   insertAudit(event: { tenantId: string; action: string; detail: string }): Promise<ProviderResult>;
   findTenantBySlug(slug: string): Promise<ProviderResult & { tenantId?: string }>;
   findConfigByTenant(tenantId: string): Promise<ProviderResult & { config?: CustomerConfigInput }>;
+  /** R1 TWO-DEVICE CONTRACT — dedicated-store uniqueness guard: who owns this store fingerprint? */
+  findByStoreFingerprint(fingerprint: string): Promise<ProviderResult & { tenantId?: string }>;
 }
 
 export interface HealthProvider {
@@ -85,22 +109,31 @@ export interface ProvisioningProviders {
   health: HealthProvider;
   /** Ephemeral Stage-5 secret handoff (optional — real adapters provide it). */
   secrets?: SecretHandoff;
+  /** R1 TWO-DEVICE CONTRACT — ephemeral device-lock handoff + readiness probe (REQUIRED for CUSTOMER READY). */
+  deviceLock?: DeviceLockProvider;
 }
 
 /** Deterministic fake implementation for tests/local verification. */
 export interface FakeProviders extends ProvisioningProviders {
   /** Test control: replace the simulated failure set (e.g. clear after a first run to test retry/resume). */
   setFailures(stages: string[]): void;
+  /** Test control: force a deployment's device-lock probe to open mode (env drift simulation). */
+  setDeviceLockOpen(hostname: string): void;
 }
 
 export function createFakeProviders(options: { failAt?: string[] } = {}): FakeProviders {
   const failures = new Set(options.failAt ?? []);
   const projects = new Map<string, string>(); // tenantId -> projectId
   const domains = new Map<string, string>(); // hostname -> projectId
-  const tenants = new Map<string, TenantInput>();
+  // AUTHORITATIVE tenant identity: slug -> { id (UUID v4), hostname } — the id is
+  // created ONCE at the customer identity boundary and reused for all retries.
+  const tenants = new Map<string, { id: string; hostname: string }>();
   const configs = new Map<string, CustomerConfigInput>();
   const releases = new Map<string, GoldenReleaseIdentity>();
   const audits: Array<{ tenantId: string; action: string }> = [];
+  // R1 TWO-DEVICE CONTRACT — fake device-lock state
+  const deviceLockConfigured = new Map<string, { secrets: DeviceLockSecretsInput; tenantId: string }>(); // projectId -> config
+  const deviceLockOpenHosts = new Set<string>(); // force-open simulation (env drift)
 
   const maybeFail = (stage: string): ProviderResult | null =>
     failures.has(stage) ? { ok: false, reason: `${stage} simulated failure` } : null;
@@ -109,6 +142,10 @@ export function createFakeProviders(options: { failAt?: string[] } = {}): FakePr
     setFailures(stages) {
       failures.clear();
       for (const stage of stages) failures.add(stage);
+    },
+    /** Test control: simulate a deployment whose device lock is NOT active (e.g. env write lost). */
+    setDeviceLockOpen(hostname: string) {
+      deviceLockOpenHosts.add(hostname);
     },
     vercel: {
       async createProject(tenantId, slug) {
@@ -158,10 +195,12 @@ export function createFakeProviders(options: { failAt?: string[] } = {}): FakePr
       async insertTenant(input) {
         const fail = maybeFail('cp.insertTenant');
         if (fail) return fail;
-        if (tenants.has(input.slug)) return { ok: true, resourceId: tenants.get(input.slug)!.hostname }; // idempotent
+        if (tenants.has(input.slug)) return { ok: true, resourceId: tenants.get(input.slug)!.id }; // idempotent
         if (!/^[A-F0-9]{64}$/.test(input.keyFingerprint)) return { ok: false, reason: 'full 64-hex uppercase fingerprint required' };
-        tenants.set(input.slug, input);
-        return { ok: true, resourceId: input.hostname };
+        // authoritative tenant identity: generated ONCE (UUID v4), persisted, reused
+        const id = crypto.randomUUID();
+        tenants.set(input.slug, { id, hostname: input.hostname });
+        return { ok: true, resourceId: id };
       },
       async insertCustomerConfig(config) {
         const fail = maybeFail('cp.insertCustomerConfig');
@@ -169,6 +208,23 @@ export function createFakeProviders(options: { failAt?: string[] } = {}): FakePr
         if (!/^[A-F0-9]{64}$/.test(config.keyFingerprint)) return { ok: false, reason: 'full 64-hex uppercase fingerprint required — raw key refused' };
         if (config.quota.monthlyTarget !== 1000 || config.quota.amberPercent !== 90 || config.quota.redPercent !== 100) {
           return { ok: false, reason: 'explicit contract quota required (1000/90/100)' };
+        }
+        // R1 TWO-DEVICE CONTRACT — persisted device policy must be exactly the contract
+        if (config.devicePolicy.maxDevices !== 2 || config.devicePolicy.mode !== 'hard_lock' || config.devicePolicy.autoEviction) {
+          return { ok: false, reason: 'device policy must match contract (max 2, hard_lock, no auto eviction)' };
+        }
+        if (!/^[A-F0-9]{64}$/.test(config.devicePolicy.storeFingerprint)) {
+          return { ok: false, reason: 'full 64-hex store fingerprint required' };
+        }
+        // dedicated-store uniqueness: NO second tenant may own the same store
+        let duplicateOwner = false;
+        configs.forEach((other, otherTenant) => {
+          if (otherTenant !== config.tenantId && other.devicePolicy.storeFingerprint === config.devicePolicy.storeFingerprint) {
+            duplicateOwner = true;
+          }
+        });
+        if (duplicateOwner) {
+          return { ok: false, reason: 'KV store already owned by another tenant' };
         }
         configs.set(config.tenantId, config);
         return { ok: true, resourceId: config.tenantId };
@@ -187,11 +243,19 @@ export function createFakeProviders(options: { failAt?: string[] } = {}): FakePr
       },
       async findTenantBySlug(slug) {
         const found = tenants.get(slug);
-        return found ? { ok: true, tenantId: found.hostname, resourceId: found.hostname } : { ok: false, reason: 'not found' };
+        return found ? { ok: true, tenantId: found.id, resourceId: found.id } : { ok: false, reason: 'not found' };
       },
       async findConfigByTenant(tenantId) {
         const found = configs.get(tenantId);
         return found ? { ok: true, config: found, resourceId: tenantId } : { ok: false, reason: 'not found' };
+      },
+      async findByStoreFingerprint(fingerprint) {
+        const owners: string[] = [];
+        configs.forEach((config, tenantId) => {
+          if (config.devicePolicy.storeFingerprint === fingerprint) owners.push(tenantId);
+        });
+        if (owners.length === 0) return { ok: false, reason: 'not found' };
+        return { ok: true, tenantId: owners[0], resourceId: owners[0] };
       },
     },
     health: {
@@ -210,10 +274,42 @@ export function createFakeProviders(options: { failAt?: string[] } = {}): FakePr
         return { ok: true, resourceId: projectId };
       },
     },
+    deviceLock: {
+      async configureDeviceLock(projectId, secrets, tenantId) {
+        const fail = maybeFail('deviceLock.configure');
+        if (fail) return fail;
+        if (!secrets || !secrets.kvRestApiUrl || !secrets.kvRestApiToken || !secrets.appPass || !tenantId) {
+          return { ok: false, reason: 'incomplete device-lock secrets' };
+        }
+        lastDeviceLockSecrets = secrets; // test assertion only — executor never serializes it
+        deviceLockConfigured.set(projectId, { secrets, tenantId });
+        return { ok: true, resourceId: projectId };
+      },
+      async verifyDeviceLock(hostname) {
+        const fail = maybeFail('deviceLock.verify');
+        if (fail) return fail;
+        const projectId = domains.get(hostname);
+        const configured = projectId ? deviceLockConfigured.has(projectId) : false;
+        const open = deviceLockOpenHosts.has(hostname) || !configured;
+        return {
+          ok: true,
+          resourceId: hostname,
+          probe: open
+            ? { mode: 'open', maxDevices: 2, kvConfigured: false, appPassConfigured: false, tenantIdConfigured: false }
+            : { mode: 'locked', maxDevices: 2, kvConfigured: true, appPassConfigured: true, tenantIdConfigured: true },
+        };
+      },
+    },
   };
 }
 /** Last raw key handed to the fake secret handoff (test assertion only — never serialized by executor). */
 let lastConfiguredPlacesKey: string | null = null;
 export function lastHandedOffPlacesKey(): string | null {
   return lastConfiguredPlacesKey;
+}
+
+/** Last device-lock secrets handed to the fake (test assertion only — never serialized by executor). */
+let lastDeviceLockSecrets: DeviceLockSecretsInput | null = null;
+export function lastHandedOffDeviceLockSecrets(): DeviceLockSecretsInput | null {
+  return lastDeviceLockSecrets;
 }
