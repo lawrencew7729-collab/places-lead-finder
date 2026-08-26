@@ -17,10 +17,16 @@
  *   - atomic claim/release/reconcile: EVAL (internal commands GET/SET/EXPIRE/
  *     INCRBY/DEL are themselves checked against the same allowlist by Redis)
  *
- * Raw ACL token/password is TRANSIENT ONLY: it is handed to the customer
- * deployment env and discarded. Persist/audit only non-secret metadata:
- * tenant ID, ACL username, central store fingerprint, full SHA-256 token
- * fingerprint, provisioning status.
+ * UPSTASH REST-TOKEN CONTRACT (owner correction 2026-08-26): the value handed
+ * to the customer deployment as KV_REST_API_TOKEN is the REST bearer token
+ * RETURNED by `ACL RESTTOKEN <username> <password>` — NOT the ACL password
+ * itself. The password and the REST token are two different credentials:
+ *   ACL SETUSER <user> on ><password> ~tenant:<TID>:* <allowlist>
+ *   ACL RESTTOKEN <user> <password>   -> returns the REST bearer token
+ * BOTH raw values are transient only and discarded after handoff. Persist
+ * only non-secret metadata: tenant ID, ACL username, central store
+ * fingerprint, full SHA-256 fingerprint OF THE REST TOKEN, provisioning
+ * status. If ACL RESTTOKEN fails, the ACL user is revoked (no orphan user).
  */
 import { createHash, randomBytes } from 'node:crypto';
 
@@ -30,19 +36,19 @@ export function aclUsernameFor(tenantId: string): string {
   return `lf_t${hex.slice(0, 12)}`;
 }
 
-/** Cryptographically random ACL credential (REST token = user password). */
-export function generateAclToken(): string {
+/** Cryptographically random ACL PASSWORD (never leaves this module). */
+export function generateAclPassword(): string {
   return randomBytes(24).toString('base64url');
 }
 
-/** Full 64-hex uppercase SHA-256 token fingerprint (non-secret metadata). */
+/** Full 64-hex uppercase SHA-256 fingerprint of the ACTUAL REST token. */
 export function aclTokenFingerprint(token: string): string {
   return createHash('sha256').update(token).digest('hex').toUpperCase();
 }
 
-/** Redis ACL command: create the restricted per-tenant user. */
-export function buildAclSetUser(username: string, token: string, tenantId: string): string {
-  return `ACL SETUSER ${username} on >${token} ~tenant:${tenantId}:* +get +set +del +incrby +expire +eval`;
+/** Redis ACL command: create the restricted per-tenant user with a PASSWORD. */
+export function buildAclSetUser(username: string, password: string, tenantId: string): string {
+  return `ACL SETUSER ${username} on >${password} ~tenant:${tenantId}:* +get +set +del +incrby +expire +eval`;
 }
 
 /** Redis ACL command: revoke the tenant ACL identity (provisioning rollback). */
@@ -53,7 +59,7 @@ export function buildAclDelUser(username: string): string {
 export interface TenantAclIdentity {
   tenantId: string;
   username: string;
-  /** FULL 64-hex token fingerprint — NEVER the raw token. */
+  /** FULL 64-hex fingerprint OF THE REST TOKEN — never the password, never the raw token. */
   tokenFingerprint: string;
 }
 
@@ -61,25 +67,76 @@ export interface TenantAclIdentity {
 export interface RedisAclAdmin {
   /** Executes a Redis command string; throws on failure. */
   run(command: string): Promise<void>;
+  /**
+   * Upstash: `ACL RESTTOKEN <username> <password>` — returns the REST bearer
+   * token bound to that ACL user. The password is NEVER returned by this
+   * interface and never leaves the provisioning module.
+   */
+  restToken(username: string, password: string): Promise<string>;
 }
 
 export interface AclProvisionResult {
   ok: true;
   identity: TenantAclIdentity;
-  /** Raw transient credential — consumed by the env handoff, then discarded. */
+  /** Raw TRANSIENT REST token — consumed by the env handoff, then discarded. */
   transientToken: string;
 }
 
 /**
- * Creates the restricted per-tenant ACL user and returns the transient token.
- * Caller MUST hand the token to the customer env and discard it; only the
- * fingerprint is persisted.
+ * Creates the restricted per-tenant ACL user, exchanges the password for the
+ * Upstash REST bearer token, and returns ONLY the REST token transiently.
+ * The password never leaves this function. If ACL RESTTOKEN fails, the ACL
+ * user is revoked immediately (no orphan user) and the error propagates.
  */
 export async function provisionTenantAcl(admin: RedisAclAdmin, tenantId: string): Promise<AclProvisionResult> {
   const username = aclUsernameFor(tenantId);
-  const token = generateAclToken();
-  await admin.run(buildAclSetUser(username, token, tenantId));
-  return { ok: true, identity: { tenantId, username, tokenFingerprint: aclTokenFingerprint(token) }, transientToken: token };
+  const password = generateAclPassword();
+  await admin.run(buildAclSetUser(username, password, tenantId));
+  let restToken: string;
+  try {
+    restToken = await admin.restToken(username, password);
+  } catch (e) {
+    try {
+      await revokeTenantAcl(admin, username);
+    } catch {
+      // best-effort revocation; the original error is the one to surface
+    }
+    throw e;
+  }
+  return { ok: true, identity: { tenantId, username, tokenFingerprint: aclTokenFingerprint(restToken) }, transientToken: restToken };
+}
+
+/**
+ * Provision + transient handoff with rollback. If the handoff (e.g. Vercel
+ * env write via configureDeviceLock) fails, the ACL user is revoked. Neither
+ * the password nor the REST token is ever persisted or logged.
+ */
+export async function provisionTenantAclWithRollback(
+  admin: RedisAclAdmin,
+  tenantId: string,
+  handoff: (transientRestToken: string) => Promise<{ ok: boolean; reason?: string }>,
+): Promise<{ ok: true; identity: TenantAclIdentity } | { ok: false; reason: string }> {
+  const username = aclUsernameFor(tenantId);
+  let created = false;
+  try {
+    const provisioned = await provisionTenantAcl(admin, tenantId);
+    created = true;
+    const handoffResult = await handoff(provisioned.transientToken);
+    if (!handoffResult.ok) {
+      await revokeTenantAcl(admin, username);
+      return { ok: false, reason: `acl handoff failed: ${handoffResult.reason || 'unknown'}` };
+    }
+    return { ok: true, identity: provisioned.identity };
+  } catch (e) {
+    if (created) {
+      try {
+        await revokeTenantAcl(admin, username);
+      } catch {
+        // best-effort
+      }
+    }
+    return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 /** Rollback: revoke the tenant ACL identity (must never leak the raw token). */
