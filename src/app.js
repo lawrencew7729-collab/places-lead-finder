@@ -1,10 +1,17 @@
 /* ================= config ================= */
 import { applyControlsToElements, controlsFor } from './searchControls.js';
 import { customerQuota } from './config.js';
+import { createUsageTelemetry } from './usageTelemetry.js';
 const API_URL = 'https://places.googleapis.com/v1/places:searchText';
-const EMBEDDED_KEY = 'AIzaSyBR_uiUSfGZtbk7Nu89sWm7ESTPfMWedFg';
+const EMBEDDED_KEY = '«redacted:AIza…»';
 const EXPECTED_ORIGINS = ['https://places-lead-finder-site.vercel.app', 'https://leadfinder.business'];
 const FIELDS = 'places.id,places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.internationalPhoneNumber,places.websiteUri,places.businessStatus,places.location,nextPageToken';
+
+/* R1 REVISED QUOTA SAFETY — event-driven telemetry (owner-approved 2026-08-26):
+   ONE Monitoring fetch per top-level RUN SEARCH; DEEP/STOP/refresh/idle = 0;
+   effectiveUsage = monitoringBase + localSessionDelta; safety stop at 950. */
+const telemetry = createUsageTelemetry();
+telemetry.setQuota(customerQuota());
 
 const SUGGESTION_DICT = {
   'restaurant': ['cafe', 'kopitiam', 'kedai makan', 'mamak restaurant', 'seafood restaurant', 'dim sum', 'noodle house', 'bistro'],
@@ -238,15 +245,19 @@ function gridParamsFor(a) {
 
 /* ================= budget UI ================= */
 async function refreshLiveUsage() {
-  try {
-    const r = await fetch('/api/usage');
-    if (!r.ok) throw new Error('http ' + r.status);
-    const j = await r.json();
-    liveUsage = (typeof j.used === 'number') ? j.used : null;
-  } catch (e) { liveUsage = null; }
+  // R1 REVISED CONTRACT: called ONLY at top-level RUN SEARCH start —
+  // maximum ONE Shared Monitoring fetch per session; FAIL CLOSED on error.
+  const res = await telemetry.refreshMonitoringBase();
+  liveUsage = res.ok ? res.used : null;
   updateBudgetUI();
+  return res;
 }
-function currentUsage() { return liveUsage !== null ? liveUsage : getUsage(); }
+function currentUsage() {
+  // Live base + session delta when a fresh snapshot exists (enforcement);
+  // otherwise the browser-local monthly estimate (display only — enforcement
+  // is always re-anchored by the RUN-start fetch, never weaker than 950).
+  return telemetry.hasLiveBase() ? telemetry.effectiveUsage() : getUsage();
+}
 function monthKey() { return new Date().toISOString().slice(0, 7); }
 function getUsage() {
   try { return JSON.parse(localStorage.getItem('places_usage') || '{}')[monthKey()] || 0; }
@@ -263,18 +274,18 @@ function updateBudgetUI() {
   const used = currentUsage(), pct = Math.min(100, Math.round(used / quota.monthlyTarget * 100));
   document.getElementById('budget-used').textContent = used.toLocaleString();
   document.getElementById('header-budget').textContent = used.toLocaleString() + '/' + quota.monthlyTarget.toLocaleString();
-  document.getElementById('budget-pct').textContent = pct + '% of the month';
+  document.getElementById('budget-pct').textContent = pct + '% · SAFETY STOP AT ' + quota.redRequests.toLocaleString();
   const now = new Date();
   const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
   const daysLeft = Math.ceil((next - now) / 86400000);
-  document.getElementById('reset-info').textContent = 'FREE TIER RESETS IN ' + daysLeft + 'D · ' + next.toISOString().slice(0, 10) + ' (UTC · 8AM MYT)';
+  document.getElementById('reset-info').textContent = 'PLACES REQUESTS USED · GOOGLE ALLOWANCE ' + quota.monthlyTarget.toLocaleString() + ' · SAFETY STOP AT ' + quota.redRequests.toLocaleString() + ' · RESETS IN ' + daysLeft + 'D (UTC · 8AM MYT)';
   const bar = document.getElementById('budget-bar');
   bar.style.width = pct + '%';
   bar.style.background = pct >= quota.redPercent ? 'linear-gradient(90deg,#dc2626,#ef4444)' : pct >= quota.amberPercent ? 'linear-gradient(90deg,#f4b942,#fbbf24)' : 'linear-gradient(90deg,#0ABAB5,#67E8F9)';
   const src = document.getElementById('quota-src');
   if (src) {
-    const live = liveUsage !== null;
-    src.textContent = live ? '● LIVE' : 'APP-LOCAL';
+    const live = telemetry.hasLiveBase();
+    src.textContent = live ? '● LIVE SNAPSHOT' : 'APP-LOCAL EST';
     src.className = 'mono text-[10px] font-bold px-2 py-0.5 rounded-md ' + (live ? 'bg-emerald-400/10 border border-emerald-400/30 text-emerald-400' : 'bg-white/5 border border-white/10 text-slate-500');
   }
 }
@@ -326,14 +337,33 @@ function processPlaces(places, a, radiusM, doFilter) {
   return added;
 }
 async function apiFetch(payload) {
-  const resp = await fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': EMBEDDED_KEY, 'X-Goog-FieldMask': FIELDS }, body: JSON.stringify(payload) });
-  return resp;
+  // R1 REVISED SAFETY CONTRACT: every outbound Places API request attempt is
+  // gated AND accounted BEFORE it is issued (includes pagination, deep search,
+  // retries, and requests that later error). At/after effectiveUsage = 950 no
+  // request may be issued — request #951 is never intentionally attempted.
+  if (!telemetry.canIssueRequest()) {
+    stopFlag = true;
+    showRunStatus('🛑 SAFETY STOP AT ' + customerQuota().redRequests.toLocaleString() + ' — NO MORE PLACES REQUESTS');
+    return null;
+  }
+  telemetry.accountRequest();
+  try {
+    return await fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': EMBEDDED_KEY, 'X-Goog-FieldMask': FIELDS }, body: JSON.stringify(payload) });
+  } catch (e) {
+    // already accounted (conservative) — surface for caller error handling
+    throw e;
+  }
 }
 
 async function runSearch() {
   if (!onOfficialDomain) { showRunStatus('✖ SEARCH DISABLED — OPEN THE OFFICIAL URL'); return; }
   const quota = customerQuota();
-  if (currentUsage() >= quota.redRequests) { showRunStatus('🛑 MONTHLY LIMIT REACHED (' + quota.redRequests.toLocaleString() + '). NEW SEARCHES DISABLED — EXISTING RESULTS REMAIN AVAILABLE.'); return; }
+  // R1 REVISED SAFETY CONTRACT: one fresh latest-available Monitoring snapshot
+  // per top-level RUN session. FAIL CLOSED: fetch failure or baseline >= 950
+  // blocks the search. localSessionDelta resets to 0 on success.
+  const base = await refreshLiveUsage();
+  if (!base.ok) { showRunStatus('✖ USAGE CHECK FAILED — SEARCH BLOCKED (MONITORING UNAVAILABLE)'); return; }
+  if (base.used >= quota.redRequests) { showRunStatus('🛑 SAFETY STOP AT ' + quota.redRequests.toLocaleString() + ' — NEW SEARCHES DISABLED — EXISTING RESULTS REMAIN AVAILABLE.'); return; }
 
   const kwInput = document.getElementById('grid-kw').value.trim();
   const kws = kwInput.split(',').map(s => s.trim()).filter(Boolean);
@@ -377,6 +407,7 @@ async function runSearch() {
       let resp;
       try { resp = await apiFetch(payload); }
       catch (e) { showRunStatus('✖ NETWORK/CORS ERROR: ' + e.message); break outer; }
+      if (!resp) break outer; // safety stop reached — apiFetch already messaged
       if (resp.status === 403 || resp.status === 404) { showRunStatus('✖ API REJECTED KEY (' + resp.status + ') — PLACES API ENABLED? KEY RESTRICTED?'); break outer; }
       if (!resp.ok) { showRunStatus('✖ HTTP ' + resp.status); break outer; }
       req++; addUsage(1);
@@ -427,7 +458,7 @@ async function deepSearch() {
   outer:
   for (let i = 0; i < deepPairs.length; i++) {
     if (!running || stopFlag) break outer;
-    if (currentUsage() >= customerQuota().redRequests) { showRunStatus('🛑 MONTHLY LIMIT REACHED (' + customerQuota().redRequests.toLocaleString() + '). NEW SEARCHES DISABLED.'); break outer; }
+    if (currentUsage() >= customerQuota().redRequests) { showRunStatus('🛑 SAFETY STOP AT ' + customerQuota().redRequests.toLocaleString() + ' — NO MORE PLACES REQUESTS.'); break outer; }
     const pair = deepPairs[i];
     const a = pair.a, kw = pair.kw;
     const { radiusKm, cellKm } = gridParamsFor(a);
@@ -440,6 +471,7 @@ async function deepSearch() {
       locationBias: { circle: { center: { latitude: a.lat, longitude: a.lng }, radius: radiusM } } };
     try {
       const r = await apiFetch(probePayload);
+      if (!r) break outer; // safety stop reached
       if (r.status === 403 || r.status === 404) { showRunStatus('✖ API REJECTED KEY (' + r.status + ')'); break outer; }
       if (!r.ok) { showRunStatus('✖ HTTP ' + r.status); break outer; }
       req++; addUsage(1);
@@ -454,6 +486,7 @@ async function deepSearch() {
         let r2;
         try {
           r2 = await apiFetch(pagePayload);
+          if (!r2) break outer; // safety stop reached
           if (!r2.ok) { showRunStatus('✖ HTTP ' + r2.status); break outer; }
           req++; addUsage(1);
           probeData = await r2.json();
@@ -477,7 +510,7 @@ async function deepSearch() {
     let stale = 0;
     for (let ci = 0; ci < cells.length; ci++) {
       if (!running || stopFlag) break outer;
-      if (currentUsage() >= customerQuota().redRequests) { showRunStatus('🛑 MONTHLY LIMIT REACHED (' + customerQuota().redRequests.toLocaleString() + '). NEW SEARCHES DISABLED.'); break outer; }
+      if (currentUsage() >= customerQuota().redRequests) { showRunStatus('🛑 SAFETY STOP AT ' + customerQuota().redRequests.toLocaleString() + ' — NO MORE PLACES REQUESTS.'); break outer; }
       const c = cells[ci];
       let pageToken = null, pageNo = 0;
       showRunStatus('▸ DEEP ' + (i + 1) + '/' + deepPairs.length + ' · ' + a.name + ' · CELL ' + (ci + 1) + '/' + cells.length + ' · ' + fetched + ' FETCHED · ' + rows.length + ' KEPT');
@@ -490,6 +523,7 @@ async function deepSearch() {
         let r3;
         try {
           r3 = await apiFetch(payload);
+          if (!r3) break outer; // safety stop reached
           if (!r3.ok) { showRunStatus('✖ HTTP ' + r3.status); break outer; }
           req++; addUsage(1);
           const data = await r3.json();
@@ -529,7 +563,8 @@ function finishSearch(msg) {
     deepBtn: document.getElementById('deep-btn'),
   });
   syncStats();
-  refreshLiveUsage();
+  // R1 REVISED CONTRACT: finishSearch must NOT trigger a Monitoring fetch
+  // (DEEP/CONTINUE completion and STOP -> 0 queries).
   if (!msg.includes('✖') && !msg.includes('CAP')) showRunStatus(msg);
   if (rows.length === 0) document.getElementById('empty-state').classList.remove('hidden');
 }
@@ -547,7 +582,7 @@ function stopSearch() {
     deepBtn: document.getElementById('deep-btn'),
   });
   syncStats();
-  refreshLiveUsage();
+  // R1 REVISED CONTRACT: STOP -> 0 Monitoring queries (local accounting only).
   showRunStatus('■ STOPPED BY USER — ' + rows.length + ' COMPANIES · ' + req + ' REQ · RESULTS PRESERVED — READY FOR A NEW SEARCH');
 }
 
@@ -612,8 +647,10 @@ function clearTable() {
 }
 
 /* ================= init ================= */
+// R1 REVISED CONTRACT: page load / refresh -> 0 Monitoring queries.
+// Display starts from the browser-local estimate; the next RUN SEARCH
+// re-anchors with one fresh snapshot.
 updateBudgetUI();
-refreshLiveUsage();
 document.getElementById('grid-kw').addEventListener('input', debounceSuggest);
 debounceSuggest();
 

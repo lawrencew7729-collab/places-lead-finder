@@ -1,49 +1,51 @@
 // Vercel serverless function: /api/usage
-// Queries Google Cloud Monitoring for the real Places API (New) request count
-// this calendar month, using a service account (Monitoring Viewer).
-// Env var: SERVICE_ACCOUNT_JSON = the full service-account JSON key.
-// ESM format (matches root package.json "type": "module" and api/device.js).
-// Quota contract: monthly limit from CUSTOMER_MONTHLY_TARGET env, default 1000 (approved contract).
-import crypto from 'node:crypto';
+// R1 REVISED SHARED MONITORING AUTH (owner-approved 2026-08-26):
+//   Vercel OIDC -> Google Workload Identity Federation -> central monitoring SA.
+//   ZERO user-managed keys: no service-account JSON credential, no private key.
+// Target identity:
+//   leadfinder-usage-monitor@leadfinder-shared-monitoring.iam.gserviceaccount.com
+// The Monitoring counter counts ALL Places API (New) requests this calendar
+// month — the authoritative OPERATIONAL SAFETY basis. It is NEVER claimed as
+// Text Search Enterprise / billing-SKU usage.
+// ESM format (matches root package.json "type": "module").
+import { getVercelOidcToken } from '@vercel/oidc';
 
-const CUSTOMER_MONTHLY_TARGET = (() => {
-  const n = Number(process.env.CUSTOMER_MONTHLY_TARGET);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1000;
-})();
-
-const SCOPE = 'https://www.googleapis.com/auth/monitoring.read';
-const TOKEN_URL = 'https://oauth2.googleapis.com/token';
+const MONITORING_SCOPE = 'https://www.googleapis.com/auth/monitoring.read';
+const STS_URL = 'https://sts.googleapis.com/v1/token';
 const MON_URL = 'https://monitoring.googleapis.com/v3/projects/';
 
-function b64url(buf) {
-  return Buffer.from(buf).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+export const DEFAULT_MONITORING_SA = 'leadfinder-usage-monitor@leadfinder-shared-monitoring.iam.gserviceaccount.com';
+
+function getMonthlyTarget(monthlyTarget) {
+  const n = Number(monthlyTarget ?? process.env.CUSTOMER_MONTHLY_TARGET);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1000;
 }
 
-async function getAccessToken(sa) {
-  const now = Math.floor(Date.now() / 1000);
-  const header = b64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
-  const claims = b64url(JSON.stringify({
-    iss: sa.client_email,
-    scope: SCOPE,
-    aud: TOKEN_URL,
-    iat: now,
-    exp: now + 3600
-  }));
-  const signingInput = header + '.' + claims;
-  const sig = crypto.sign('RSA-SHA256', Buffer.from(signingInput), sa.private_key);
-  const jwt = signingInput + '.' + b64url(sig);
-
-  const r = await fetch(TOKEN_URL, {
+/** STS token exchange: Vercel OIDC token -> impersonated central SA token. */
+async function exchangeForSaToken(oidcToken, audience, sa, fetchImpl) {
+  const body = new URLSearchParams({
+    grantType: 'urn:ietf:params:oauth:grant-type:token-exchange',
+    requestedTokenType: 'urn:ietf:params:oauth:token-type:access_token',
+    subjectTokenType: 'urn:ietf:params:oauth:token-type:jwt',
+    subjectToken: oidcToken,
+    audience,
+    scope: MONITORING_SCOPE,
+    serviceAccount: sa,
+  });
+  const r = await fetchImpl(STS_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion: jwt })
+    body,
   });
   const j = await r.json();
-  if (!j.access_token) throw new Error('token exchange failed: ' + (j.error_description || j.error));
+  if (!r.ok || !j.access_token) {
+    throw new Error('sts ' + r.status + ': ' + (j.error_description || j.error || 'exchange failed'));
+  }
   return j.access_token;
 }
 
-async function getPlacesUsage(token, projectId) {
+/** Broad Places API (New) request count, calendar month to date (safety basis). */
+async function getPlacesUsage(token, projectId, fetchImpl) {
   const now = new Date();
   const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
   const end = now.toISOString();
@@ -58,7 +60,7 @@ async function getPlacesUsage(token, projectId) {
     '&aggregation.alignmentPeriod=3600s' +
     '&aggregation.perSeriesAligner=ALIGN_SUM';
 
-  const r = await fetch(url, { headers: { Authorization: 'Bearer ' + token } });
+  const r = await fetchImpl(url, { headers: { Authorization: 'Bearer ' + token } });
   if (!r.ok) throw new Error('monitoring ' + r.status + ': ' + (await r.text()).slice(0, 200));
   const j = await r.json();
   let total = 0;
@@ -71,18 +73,50 @@ async function getPlacesUsage(token, projectId) {
   return Math.round(total);
 }
 
-export default async function handler(req, res) {
-  res.setHeader('Cache-Control', 'no-store');
-  const saJson = process.env.SERVICE_ACCOUNT_JSON;
-  if (!saJson) {
-    return res.status(503).json({ error: 'not_configured', used: null, cap: CUSTOMER_MONTHLY_TARGET });
-  }
-  try {
-    const sa = JSON.parse(saJson);
-    const token = await getAccessToken(sa);
-    const used = await getPlacesUsage(token, sa.project_id);
-    res.json({ used, cap: CUSTOMER_MONTHLY_TARGET, month: new Date().toISOString().slice(0, 7), source: 'monitoring' });
-  } catch (e) {
-    res.status(500).json({ error: e.message, used: null, cap: CUSTOMER_MONTHLY_TARGET });
-  }
-};
+/**
+ * Injectable handler factory (unit-testable). Defaults read server env:
+ *   WIF_AUDIENCE                    — WIF pool provider audience (required)
+ *   CUSTOMER_MONITORING_SA          — impersonated SA (default central SA)
+ *   CUSTOMER_GOOGLE_PROJECT_ID | GOOGLE_CLOUD_PROJECT_ID — project to query
+ *   CUSTOMER_MONTHLY_TARGET         — monthly allowance (default 1000)
+ * No user-managed service-account credential anywhere in this candidate.
+ */
+export function createUsageHandler(deps = {}) {
+  const {
+    oidcTokenProvider = getVercelOidcToken,
+    fetchImpl = fetch,
+    monitoringSa,
+    wifAudience,
+    monthlyTarget,
+  } = deps;
+
+  return async function handler(req, res) {
+    res.setHeader('Cache-Control', 'no-store');
+    // Env is read at REQUEST time (serverless cold-start safe, test-friendly).
+    const sa = monitoringSa || process.env.CUSTOMER_MONITORING_SA || DEFAULT_MONITORING_SA;
+    const audience = wifAudience || process.env.WIF_AUDIENCE || '';
+    const cap = getMonthlyTarget(monthlyTarget);
+    const projectId = process.env.CUSTOMER_GOOGLE_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT_ID || '';
+    if (!audience || !projectId) {
+      return res.status(503).json({ error: 'not_configured', used: null, cap });
+    }
+    let oidcToken;
+    try {
+      oidcToken = await oidcTokenProvider();
+    } catch (e) {
+      return res.status(503).json({ error: 'oidc_unavailable', used: null, cap });
+    }
+    if (!oidcToken) {
+      return res.status(503).json({ error: 'not_configured', used: null, cap });
+    }
+    try {
+      const token = await exchangeForSaToken(oidcToken, audience, sa, fetchImpl);
+      const used = await getPlacesUsage(token, projectId, fetchImpl);
+      res.json({ used, cap, month: new Date().toISOString().slice(0, 7), source: 'monitoring' });
+    } catch (e) {
+      res.status(500).json({ error: String((e && e.message) || e), used: null, cap });
+    }
+  };
+}
+
+export default createUsageHandler();
