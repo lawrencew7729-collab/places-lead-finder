@@ -15,6 +15,7 @@ import { SESSION_TTL_SECONDS, MAX_SESSION_REQUESTS } from './session.js';
 
 const MONITORING_SCOPE = 'https://www.googleapis.com/auth/monitoring.read';
 const STS_URL = 'https://sts.googleapis.com/v1/token';
+const IAMCRED_URL = 'https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/';
 const MON_URL = 'https://monitoring.googleapis.com/v3/projects/';
 
 export const SAFETY_STOP = 950;
@@ -38,8 +39,13 @@ function getMonthlyTarget(monthlyTarget) {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1000;
 }
 
-/** STS token exchange: Vercel OIDC token -> impersonated central SA token. */
-async function exchangeForSaToken(oidcToken, audience, sa, fetchImpl) {
+/**
+ * STS token exchange: Vercel OIDC token -> federated access token.
+ * NOTE (v1.0.6): the STS v1 API has NO `serviceAccount` parameter (unknown
+ * fields are silently ignored) — service-account access comes from the
+ * SECOND stage: IAMCredentials generateAccessToken with the federated token.
+ */
+async function exchangeForFederatedToken(oidcToken, audience, fetchImpl) {
   const body = new URLSearchParams({
     grantType: 'urn:ietf:params:oauth:grant-type:token-exchange',
     requestedTokenType: 'urn:ietf:params:oauth:token-type:access_token',
@@ -47,7 +53,6 @@ async function exchangeForSaToken(oidcToken, audience, sa, fetchImpl) {
     subjectToken: oidcToken,
     audience,
     scope: MONITORING_SCOPE,
-    serviceAccount: sa,
   });
   const r = await fetchImpl(STS_URL, {
     method: 'POST',
@@ -59,6 +64,20 @@ async function exchangeForSaToken(oidcToken, audience, sa, fetchImpl) {
     throw new Error('sts ' + r.status + ': ' + (j.error_description || j.error || 'exchange failed'));
   }
   return j.access_token;
+}
+
+/** IAMCredentials: federated token -> short-lived central SA access token. */
+async function generateSaAccessToken(federatedToken, sa, fetchImpl) {
+  const r = await fetchImpl(IAMCRED_URL + encodeURIComponent(sa) + ':generateAccessToken', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + federatedToken, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scope: [MONITORING_SCOPE], lifetime: '300s' }),
+  });
+  const j = await r.json();
+  if (!r.ok || !j.accessToken) {
+    throw new Error('iamcredentials ' + r.status + ': ' + ((j.error && j.error.message) || 'generateAccessToken failed'));
+  }
+  return j.accessToken;
 }
 
 /** Broad Places API (New) request count, calendar month to date (safety basis). */
@@ -138,8 +157,10 @@ export function createUsageHandler(deps = {}) {
     }
     try {
       // 1. ONE latest-available Google Monitoring snapshot (broad Places count).
-      const token = await exchangeForSaToken(oidcToken, audience, sa, fetchImpl);
-      const monitoringUsed = await getPlacesUsage(token, projectId, fetchImpl, now());
+      //    v1.0.6 two-stage auth: STS federated token -> IAMCredentials SA token.
+      const federated = await exchangeForFederatedToken(oidcToken, audience, fetchImpl);
+      const saToken = await generateSaAccessToken(federated, sa, fetchImpl);
+      const monitoringUsed = await getPlacesUsage(saToken, projectId, fetchImpl, now());
       // 2. tenant Redis usage bridge (covers Monitoring propagation delay);
       //    server-authoritative Pacific billing month (never client-supplied).
       const month = pacificBillingMonth(now());
@@ -178,7 +199,9 @@ export function createUsageHandler(deps = {}) {
         source: 'monitoring',
       });
     } catch (e) {
-      res.status(500).json({ error: String((e && e.message) || e), used: null, cap });
+      // FAIL CLOSED: every auth/infra stage failure is 503 unavailable —
+      // the browser must never proceed to Google Places on a failed claim.
+      res.status(503).json({ error: String((e && e.message) || e), used: null, cap });
     }
   };
 }
