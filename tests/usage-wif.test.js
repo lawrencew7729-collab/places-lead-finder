@@ -80,6 +80,7 @@ describe('R1 v1.0.6 WIF two-stage auth (STS -> IAMCredentials -> Monitoring)', (
     expect(sts).toBeTruthy();
     expect(String(sts.init.body)).not.toContain('serviceAccount');
     expect(String(sts.init.body)).not.toContain('service_account');
+    expect(String(sts.init.body)).toContain(encodeURIComponent('https://www.googleapis.com/auth/cloud-platform'));
 
     const iam = fetchImpl.calls.find((c) => c.url.includes('iamcredentials.googleapis.com'));
     expect(iam).toBeTruthy();

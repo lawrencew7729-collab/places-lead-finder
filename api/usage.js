@@ -14,6 +14,11 @@ import { pacificBillingMonth, pacificBillingMonthStartUtc } from './billingMonth
 import { SESSION_TTL_SECONDS, MAX_SESSION_REQUESTS } from './session.js';
 
 const MONITORING_SCOPE = 'https://www.googleapis.com/auth/monitoring.read';
+// The STS federated token must carry cloud-platform: it is ONLY used to call
+// IAMCredentials generateAccessToken (iam.serviceAccounts.getAccessToken),
+// which requires cloud-platform. The SA token minted by generateAccessToken
+// carries exactly [monitoring.read] — Monitoring never sees the federated token.
+const FEDERATED_SCOPE = 'https://www.googleapis.com/auth/cloud-platform';
 const STS_URL = 'https://sts.googleapis.com/v1/token';
 const IAMCRED_URL = 'https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/';
 const MON_URL = 'https://monitoring.googleapis.com/v3/projects/';
@@ -52,7 +57,7 @@ async function exchangeForFederatedToken(oidcToken, audience, fetchImpl) {
     subjectTokenType: 'urn:ietf:params:oauth:token-type:jwt',
     subjectToken: oidcToken,
     audience,
-    scope: MONITORING_SCOPE,
+    scope: FEDERATED_SCOPE,
   });
   const r = await fetchImpl(STS_URL, {
     method: 'POST',
