@@ -102,8 +102,12 @@ async function getPlacesUsage(token, projectId, fetchImpl, now = new Date()) {
     '&interval.endTime=' + encodeURIComponent(end) +
     '&aggregation.alignmentPeriod=3600s' +
     '&aggregation.perSeriesAligner=ALIGN_SUM';
-
-  const r = await fetchImpl(url, { headers: { Authorization: 'Bearer ' + token } });
+  // The SA's home (quota) project has no billing; X-Goog-User-Project moves the
+  // billing check to the customer's T1 project (which is billable) — the same
+  // project being queried. Header value = non-secret GCP project id.
+  const r = await fetchImpl(url, {
+    headers: { Authorization: 'Bearer ' + token, 'X-Goog-User-Project': projectId },
+  });
   if (!r.ok) throw new Error('monitoring ' + r.status + ': ' + (await r.text()).slice(0, 200));
   const j = await r.json();
   let total = 0;

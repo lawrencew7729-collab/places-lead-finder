@@ -93,6 +93,7 @@ describe('R1 v1.0.6 WIF two-stage auth (STS -> IAMCredentials -> Monitoring)', (
     const mon = fetchImpl.calls.find((c) => c.url.includes('monitoring.googleapis.com'));
     expect(mon).toBeTruthy();
     expect(mon.init.headers.Authorization).toBe('Bearer sa-token-1'); // SA token ONLY reaches Monitoring
+    expect(mon.init.headers['X-Goog-User-Project']).toBe('lf-t1-sbx-563bfb5f'); // billing check on the billable T1 project
 
     expect(res.statusCode).toBe(200);
     expect(res.body.used).toBe(42);
