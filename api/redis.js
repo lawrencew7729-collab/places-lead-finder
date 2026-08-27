@@ -51,7 +51,7 @@ export function redisClient({ url, token, fetchImpl } = {}) {
   return {
     configured,
     get: (k) => cmd('get', [k]),
-    set: (k, v) => cmd('set', [k, v]),
+    set: (k, v, ...opts) => cmd('set', [k, v, ...opts]),
     del: (...ks) => cmd('del', ks),
     incrby: (k, n) => cmd('incrby', [k, n]),
     expire: (k, s) => cmd('expire', [k, s]),

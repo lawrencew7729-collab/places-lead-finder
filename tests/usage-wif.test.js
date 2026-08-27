@@ -43,7 +43,7 @@ function memoryRedis({ usage = 0, lease = null } = {}) {
       configured: () => true,
       get: async (k) => { calls.push(['get', k]); if (k.includes('usage')) return String(usageV); return leaseV; },
       set: async (k, v, ...opts) => {
-        calls.push(['set', k]);
+        calls.push(['set', k, ...opts]);
         if (k.includes('active_search')) { if (opts.includes('NX') && leaseV) return null; leaseV = v; return 'OK'; }
         usageV = Number(v) || usageV; return 'OK';
       },
@@ -164,11 +164,25 @@ describe('R1 v1.0.6 WIF two-stage auth (STS -> IAMCredentials -> Monitoring)', (
 
   it('lease conflict: another active session -> locked (no sessionId)', async () => {
     const fetchImpl = scriptedFetch();
-    const { redis } = memoryRedis({ lease: JSON.stringify({ sessionId: 'other', deviceId: 'dev-2', attempts: 0 }) });
+    const { redis, calls } = memoryRedis({ lease: JSON.stringify({ sessionId: 'other', deviceId: 'dev-2', attempts: 0 }) });
     const res = fakeRes();
     await handlerWith({ fetchImpl, redis })({ query: {} }, res);
     expect(res.body.locked).toBe(true);
     expect(res.body.sessionId).toBeUndefined();
+    // acquire is a plain SET without NX here because the key exists already; the
+    // NX option forwarding itself is asserted by the success-path test below.
+  });
+
+  it('lease acquire carries EX/NX options to the store (single active-search exclusivity)', async () => {
+    const fetchImpl = scriptedFetch();
+    const { redis, calls } = memoryRedis();
+    const res = fakeRes();
+    await handlerWith({ fetchImpl, redis })({ query: {} }, res);
+    const acquire = calls.find((c) => c[0] === 'set' && c[1].includes('active_search'));
+    expect(acquire).toBeTruthy();
+    expect(acquire).toContain('EX');
+    expect(acquire).toContain('NX');
+    expect(acquire).toContain(String(res.body.leaseTtlSeconds));
   });
 
   it('tokens are never logged: handler output + call bodies contain no token material', async () => {

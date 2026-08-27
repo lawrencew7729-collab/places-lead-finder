@@ -35,6 +35,10 @@ function createKv() {
       return { ok: true, status: 200, json: async () => ({ result: raw }) };
     }
     if (command === 'set') {
+      // opts (EX/NX...) forwarded to the path so Upstash applies them
+      const opts = segs.slice(3);
+      const isNx = opts.includes('NX');
+      if (isNx && store.has(segs[1])) return { ok: true, status: 200, json: async () => ({ result: null }) };
       store.set(segs[1], JSON.parse(segs[2]));
       return { ok: true, status: 200, json: async () => ({ result: 'OK' }) };
     }
