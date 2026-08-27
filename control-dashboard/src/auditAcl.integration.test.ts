@@ -114,14 +114,15 @@ describe('hosted Supabase audit writer ACL correction', () => {
       },
     ]);
     const names = orderedMigrations();
-    // 009 (R1 CENTRALIZED store/ACL model) is now the latest migration;
+    // 010 (B2 safety stop 900 defaults) is now the latest migration;
     // the ACL contract itself was fixed in 004 and remains unchanged.
-    expect(names[names.length - 1]).toBe('009_central_store_acl_model.sql');
+    expect(names[names.length - 1]).toBe('010_b2_safety_stop_900_default.sql');
     expect(names).toContain('004_fix_audit_function_acl.sql');
     expect(names).toContain('005_quota_contract_alignment.sql');
     expect(names).toContain('006_full_fingerprint_contract.sql');
     expect(names).toContain('007_device_lock_contract.sql');
     expect(names).toContain('008_red_safety_stop_default.sql');
+    expect(names).toContain('009_central_store_acl_model.sql');
   }, 30_000);
 
   it('rejects anonymous, public and wrong-role calls before either writer can insert', async () => {

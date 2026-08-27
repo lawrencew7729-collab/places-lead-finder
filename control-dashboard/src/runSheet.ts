@@ -72,7 +72,7 @@ export const RUN_SHEET_SUCCESS_DETAILS: Record<RunSheetStageId, string> = Object
   places_key: 'Places key configured',
   restriction: 'Website restriction verified',
   monitoring: 'Shared Monitoring connected',
-  quota: 'Quota policy 1000 / 900 / 950 (SAFETY STOP) verified',
+  quota: 'Quota policy 1000 / 850 / 900 (SAFETY STOP) verified',
   health: 'Health checks passed',
   device_lock: 'DEVICE ACCESS POLICY VERIFIED — 2 DEVICE LIMIT ACTIVE',
   finalize: 'Customer record finalized',

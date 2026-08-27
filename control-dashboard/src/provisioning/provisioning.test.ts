@@ -34,24 +34,24 @@ function input(overrides: Partial<Parameters<typeof runProvisioning>[1]> = {}) {
 }
 
 describe('R1 quota contract (dashboard side)', () => {
-  it('explicit provisioning quota writes 1000/90/100/disable_new_search', () => {
+  it('explicit provisioning quota writes 1000/85/90/disable_new_search', () => {
     const q = explicitProvisioningQuota();
-    expect(q).toEqual({ monthlyTarget: 1000, amberPercent: 90, redPercent: 95, enforcementMode: 'disable_new_search' });
+    expect(q).toEqual({ monthlyTarget: 1000, amberPercent: 85, redPercent: 90, enforcementMode: 'disable_new_search' });
   });
 
-  it('quota signal: green <900, amber 900-949, red 950+ (safety stop)', () => {
+  it('quota signal: green <850, amber 850-899, red 900+ (B2 safety stop)', () => {
     expect(quotaSignal(0)).toBe('green');
-    expect(quotaSignal(899)).toBe('green');
-    expect(quotaSignal(900)).toBe('amber');
-    expect(quotaSignal(949)).toBe('amber');
-    expect(quotaSignal(950)).toBe('red');
+    expect(quotaSignal(849)).toBe('green');
+    expect(quotaSignal(850)).toBe('amber');
+    expect(quotaSignal(899)).toBe('amber');
+    expect(quotaSignal(900)).toBe('red');
     expect(quotaSignal(999)).toBe('red');
     expect(quotaSignal(1000)).toBe('red');
     expect(quotaSignal(1500)).toBe('red');
   });
 
   it('verifyQuotaConsistency fails closed on any disagreement', () => {
-    const runtime = { monthlyTarget: 1000, amberPercent: 90, redPercent: 95, enforcementMode: 'disable_new_search' as const };
+    const runtime = { monthlyTarget: 1000, amberPercent: 85, redPercent: 90, enforcementMode: 'disable_new_search' as const };
     expect(verifyQuotaConsistency(runtime, runtime).consistent).toBe(true);
     expect(verifyQuotaConsistency(runtime, { ...runtime, amberPercent: 80 }).consistent).toBe(false);
     expect(verifyQuotaConsistency(runtime, { ...runtime, monthlyTarget: 5000 }).consistent).toBe(false);

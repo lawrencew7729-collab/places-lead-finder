@@ -2,11 +2,12 @@
  * Customer-app runtime quota configuration (non-secret, build-time injected).
  *
  * ONE authoritative new-customer quota contract (REVISED owner safety
- * contract, 2026-08-26):
+ * contract, 2026-08-26 · B2 hardening, owner decision 2026-08-27):
  *   Google monthly allowance 1000 ALL Places API (New) requests
- *   AMBER 900 (90%) · HARD SAFETY STOP 950 (95%) · reserved buffer 50
- *   · enforcement disable_new_search at 950
- * The 950–1000 range is a permanent safety reserve, NOT customer-usable.
+ *   AMBER 850 (85%) · HARD SAFETY STOP 900 (90%) · reserved buffer 100
+ *   · enforcement disable_new_search at 900
+ * The 900–1000 range is a permanent safety reserve, NOT customer-usable
+ * (app-originated max = 899 + 50-session = 949).
  * The counter is ALL Places API (New) requests (operational safety basis) —
  * NEVER claimed as Enterprise SKU usage.
  *
@@ -22,8 +23,8 @@
 
 export const DEFAULT_QUOTA = Object.freeze({
   monthlyTarget: 1000,
-  amberPercent: 90,
-  redPercent: 95,
+  amberPercent: 85,
+  redPercent: 90,
   enforcementMode: 'disable_new_search',
 });
 

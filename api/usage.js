@@ -23,7 +23,7 @@ const STS_URL = 'https://sts.googleapis.com/v1/token';
 const IAMCRED_URL = 'https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/';
 const MON_URL = 'https://monitoring.googleapis.com/v3/projects/';
 
-export const SAFETY_STOP = 950;
+export const SAFETY_STOP = 900;
 export const GOOGLE_ALLOWANCE = 1000;
 
 /** Atomic usage-floor reconcile: tenant usage NEVER moves backward vs Monitoring. */
@@ -178,7 +178,8 @@ export function createUsageHandler(deps = {}) {
       // 3. atomic reconcile floor — usage can NEVER move backward.
       const reconciled = await redis.eval(RECONCILE_SCRIPT, [usageKey], [String(monitoringUsed)]);
       const effectiveStart = Math.max(monitoringUsed, Number(reconciled ?? monitoringUsed));
-      // 4. SAFETY STOP: 950 blocks NEW top-level RUN.
+      // 4. SAFETY STOP: 900 blocks NEW top-level RUN (B2 owner decision 2026-08-27:
+      //    max app-originated traffic = 899 + 50 session = 949 < 1000 Enterprise cap).
       if (effectiveStart >= SAFETY_STOP) {
         return res.json({ used: effectiveStart, cap, safetyStop: SAFETY_STOP, month, blocked: true });
       }

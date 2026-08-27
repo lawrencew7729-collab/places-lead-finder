@@ -171,7 +171,7 @@ export function createFakeProviders(options: { failAt?: string[] } = {}): FakePr
       async setRuntimeEnv(projectId, env) {
         const fail = maybeFail('vercel.setRuntimeEnv');
         if (fail) return fail;
-        if (env.monthlyTarget !== 1000 || env.amberPercent !== 90 || env.redPercent !== 95) {
+        if (env.monthlyTarget !== 1000 || env.amberPercent !== 85 || env.redPercent !== 90) {
           return { ok: false, reason: 'runtime quota must match approved contract' };
         }
         return { ok: true, resourceId: projectId };
@@ -206,8 +206,8 @@ export function createFakeProviders(options: { failAt?: string[] } = {}): FakePr
         const fail = maybeFail('cp.insertCustomerConfig');
         if (fail) return fail;
         if (!/^[A-F0-9]{64}$/.test(config.keyFingerprint)) return { ok: false, reason: 'full 64-hex uppercase fingerprint required — raw key refused' };
-        if (config.quota.monthlyTarget !== 1000 || config.quota.amberPercent !== 90 || config.quota.redPercent !== 95) {
-          return { ok: false, reason: 'explicit contract quota required (1000/90/95)' };
+        if (config.quota.monthlyTarget !== 1000 || config.quota.amberPercent !== 85 || config.quota.redPercent !== 90) {
+          return { ok: false, reason: 'explicit contract quota required (1000/85/90)' };
         }
         // R1 TWO-DEVICE CONTRACT — persisted device policy must be exactly the contract
         if (config.devicePolicy.maxDevices !== 2 || config.devicePolicy.mode !== 'hard_lock' || config.devicePolicy.autoEviction) {

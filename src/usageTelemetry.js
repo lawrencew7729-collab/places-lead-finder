@@ -1,11 +1,12 @@
 /**
  * R1 CENTRALIZED QUOTA/LOCK CONTRACT — browser usage telemetry (UX layer).
  *
- * Owner-approved (2026-08-26):
+ * Owner-approved (2026-08-26, B2 hardening 2026-08-27):
  *   - ONE centralized Upstash Redis DB; per-tenant ACL credential.
- *   - Google allowance 1000 ALL Places requests/month · AMBER 900
- *   - SAFETY STOP 950 blocks NEW top-level RUN (an authorized session may
- *     finish above 950, bounded by the HARD server-side 50-attempt cap).
+ *   - Google allowance 1000 ALL Places requests/month · AMBER 850
+ *   - SAFETY STOP 900 blocks NEW top-level RUN (an authorized session may
+ *     finish above 900, bounded by the HARD server-side 50-attempt cap;
+ *     app-originated monthly max = 899 + 50 = 949 < 1000 Enterprise cap).
  *   - Only ONE device may hold an active search (SET NX lease, TTL 120s,
  *     renewed by every successful claim; no heartbeat polling).
  *
@@ -17,7 +18,7 @@
 export const SESSION_CONTRACT = Object.freeze({
   maxSessionRequests: 50,
   leaseTtlSeconds: 120,
-  safetyStop: 950,
+  safetyStop: 900,
   allowance: 1000,
 });
 

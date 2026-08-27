@@ -32,7 +32,7 @@ function fakeFetch(script) {
   return { impl, calls };
 }
 
-const OK_START = { used: 100, cap: 1000, safetyStop: 950, sessionId: 'sess-1', maxSessionRequests: 50, expiresAt: '2026-08-26T00:00:00.000Z' };
+const OK_START = { used: 100, cap: 1000, safetyStop: 900, sessionId: 'sess-1', maxSessionRequests: 50, expiresAt: '2026-08-26T00:00:00.000Z' };
 
 describe('R1 CENTRALIZED — telemetry UX layer (server is the authority)', () => {
   it('RUN start: exactly ONE /api/usage call; session context returned', async () => {
@@ -56,8 +56,8 @@ describe('R1 CENTRALIZED — telemetry UX layer (server is the authority)', () =
     expect(usageCalls.length).toBe(1); // only the RUN-start Monitoring query
   });
 
-  it('blocked >= 950: startRun returns blocked, no session', async () => {
-    const { impl } = fakeFetch({ usageResponse: { used: 950, cap: 1000, safetyStop: 950, blocked: true } });
+  it('blocked >= 900: startRun returns blocked, no session', async () => {
+    const { impl } = fakeFetch({ usageResponse: { used: 900, cap: 1000, safetyStop: 900, blocked: true } });
     const t = createUsageTelemetry({ fetchImpl: impl });
     const start = await t.startRun('dev-A');
     expect(start.ok).toBe(false);
@@ -66,7 +66,7 @@ describe('R1 CENTRALIZED — telemetry UX layer (server is the authority)', () =
   });
 
   it('locked by another device: startRun returns locked (no session)', async () => {
-    const { impl } = fakeFetch({ usageResponse: { used: 300, cap: 1000, safetyStop: 950, locked: true } });
+    const { impl } = fakeFetch({ usageResponse: { used: 300, cap: 1000, safetyStop: 900, locked: true } });
     const t = createUsageTelemetry({ fetchImpl: impl });
     const start = await t.startRun('dev-A');
     expect(start.ok).toBe(false);
@@ -132,10 +132,10 @@ describe('R1 CENTRALIZED — telemetry UX layer (server is the authority)', () =
     expect(source).not.toContain('setTimeout(');
   });
 
-  it('contract constants: 50 / 120s / 950 / 1000', () => {
+  it('contract constants: 50 / 120s / 900 / 1000', () => {
     expect(SESSION_CONTRACT.maxSessionRequests).toBe(50);
     expect(SESSION_CONTRACT.leaseTtlSeconds).toBe(120);
-    expect(SESSION_CONTRACT.safetyStop).toBe(950);
+    expect(SESSION_CONTRACT.safetyStop).toBe(900);
     expect(SESSION_CONTRACT.allowance).toBe(1000);
   });
 });

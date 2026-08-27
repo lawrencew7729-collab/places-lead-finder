@@ -151,15 +151,48 @@ describe('R1 v1.0.6 WIF two-stage auth (STS -> IAMCredentials -> Monitoring)', (
     expect(fetchImpl.calls.length).toBe(0);
   });
 
-  it('reconcile floor + NX lease acquire + safety stop 950 on the RUN-start path', async () => {
-    // Monitoring 947 + Redis 956 -> effective 956 -> RUN blocked
-    const fetchImpl = scriptedFetch({ monBody: { timeSeries: [{ points: [{ value: { doubleValue: 947 } }] }] } });
-    const { redis } = memoryRedis({ usage: 956 });
+  it('B2 reconcile floor + NX lease acquire + safety stop 900 on the RUN-start path', async () => {
+    // Monitoring 899 (stale) + Redis 901 -> effective 901 -> RUN blocked
+    const fetchImpl = scriptedFetch({ monBody: { timeSeries: [{ points: [{ value: { doubleValue: 899 } }] }] } });
+    const { redis } = memoryRedis({ usage: 901 });
     const res = fakeRes();
     await handlerWith({ fetchImpl, redis })({ query: {} }, res);
-    expect(res.body.used).toBe(956);
+    expect(res.body.used).toBe(901);
     expect(res.body.blocked).toBe(true);
     expect(res.body.sessionId).toBeUndefined();
+  });
+
+  it('B2 boundary: 899 usage -> RUN may start (lease acquired)', async () => {
+    const fetchImpl = scriptedFetch({ monBody: { timeSeries: [{ points: [{ value: { doubleValue: 899 } }] }] } });
+    const { redis } = memoryRedis();
+    const res = fakeRes();
+    await handlerWith({ fetchImpl, redis })({ query: {} }, res);
+    expect(res.body.used).toBe(899);
+    expect(res.body.blocked).toBeUndefined();
+    expect(res.body.locked).toBeUndefined();
+    expect(res.body.sessionId).toBeTruthy();
+    expect(res.body.safetyStop).toBe(900);
+    expect(res.body.maxSessionRequests).toBe(50);
+  });
+
+  it('B2 boundary: 900 usage -> new RUN blocked', async () => {
+    const fetchImpl = scriptedFetch({ monBody: { timeSeries: [{ points: [{ value: { doubleValue: 900 } }] }] } });
+    const { redis } = memoryRedis();
+    const res = fakeRes();
+    await handlerWith({ fetchImpl, redis })({ query: {} }, res);
+    expect(res.body.used).toBe(900);
+    expect(res.body.blocked).toBe(true);
+    expect(res.body.sessionId).toBeUndefined();
+  });
+
+  it('B2: Monitoring reconcile cannot reduce the Redis floor (usage never moves backward)', async () => {
+    // Redis 949 (899 start + 50 claims) vs stale Monitoring 899 -> effective stays 949
+    const fetchImpl = scriptedFetch({ monBody: { timeSeries: [{ points: [{ value: { doubleValue: 899 } }] }] } });
+    const { redis } = memoryRedis({ usage: 949 });
+    const res = fakeRes();
+    await handlerWith({ fetchImpl, redis })({ query: {} }, res);
+    expect(res.body.used).toBe(949); // NOT lowered to 899
+    expect(res.body.blocked).toBe(true);
   });
 
   it('lease conflict: another active session -> locked (no sessionId)', async () => {

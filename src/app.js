@@ -9,7 +9,7 @@ const FIELDS = 'places.id,places.displayName,places.formattedAddress,places.nati
 
 /* R1 REVISED QUOTA SAFETY — event-driven telemetry (owner-approved 2026-08-26):
    ONE Monitoring fetch per top-level RUN SEARCH; DEEP/STOP/refresh/idle = 0;
-   effectiveUsage = monitoringBase + localSessionDelta; safety stop at 950. */
+   effectiveUsage = monitoringBase + localSessionDelta; safety stop at 900. */
 const telemetry = createUsageTelemetry();
 telemetry.setQuota(customerQuota());
 
@@ -360,7 +360,7 @@ async function runSearch() {
   const quota = customerQuota();
   // R1 CENTRALIZED CONTRACT: one Monitoring query max at RUN start; the
   // server reconciles Monitoring vs tenant Redis bridge (max, never backward),
-  // blocks at >= 950, and atomically acquires the single active-search lease.
+  // blocks at >= 900, and atomically acquires the single active-search lease.
   const start = await telemetry.startRun(getDeviceId());
   if (!start.ok) {
     if (start.locked) {

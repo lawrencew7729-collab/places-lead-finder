@@ -89,8 +89,8 @@ describe('R1 final closure — quota ENV consistency', () => {
     const pairs = runtimeEnvPairs();
     expect(pairs.browser).toEqual({
       VITE_CUSTOMER_MONTHLY_TARGET: '1000',
-      VITE_CUSTOMER_AMBER_PERCENT: '90',
-      VITE_CUSTOMER_RED_PERCENT: '95',
+      VITE_CUSTOMER_AMBER_PERCENT: '85',
+      VITE_CUSTOMER_RED_PERCENT: '90',
       VITE_CUSTOMER_ENFORCEMENT_MODE: 'disable_new_search',
     });
     expect(pairs.server).toEqual({ CUSTOMER_MONTHLY_TARGET: '1000' });
@@ -136,7 +136,7 @@ describe('R1 final closure — real server-side adapters', () => {
     const adapter = createVercelAdapter({ token: 't', teamId: 'team_x', transport });
     const created = await adapter.createProject('tenant-1', 'abc');
     expect(created.ok && created.resourceId).toBe('prj_new');
-    const env = await adapter.setRuntimeEnv('prj_new', { monthlyTarget: 1000, amberPercent: 90, redPercent: 95, enforcementMode: 'disable_new_search', googleProjectId: 'p1' });
+    const env = await adapter.setRuntimeEnv('prj_new', { monthlyTarget: 1000, amberPercent: 85, redPercent: 90, enforcementMode: 'disable_new_search', googleProjectId: 'p1' });
     expect(env.ok).toBe(true);
     const envCalls = calls.filter((c) => c.url.includes('/env'));
     expect(envCalls.length).toBe(6); // 4 browser + server monthly + google project
@@ -154,7 +154,7 @@ describe('R1 final closure — real server-side adapters', () => {
       keyFingerprint: FP,
       websiteRestrictionExact: 'https://abc.leadfinder.business/*',
       monitoringMode: 'shared_access',
-      quota: { monthlyTarget: 1000, amberPercent: 90, redPercent: 95, enforcementMode: 'disable_new_search' },
+      quota: { monthlyTarget: 1000, amberPercent: 85, redPercent: 90, enforcementMode: 'disable_new_search' },
       devicePolicy: {
         maxDevices: 2,
         mode: 'hard_lock',
@@ -168,8 +168,8 @@ describe('R1 final closure — real server-side adapters', () => {
     expect(res.ok).toBe(true);
     const body = JSON.parse(calls[0].body ?? '{}');
     expect(body.monthly_usage_target).toBe(1000);
-    expect(body.amber_threshold_percent).toBe(90);
-    expect(body.red_threshold_percent).toBe(95);
+    expect(body.amber_threshold_percent).toBe(85);
+    expect(body.red_threshold_percent).toBe(90);
     expect(body.quota_enforcement_mode).toBe('disable_new_search');
     expect(body.places_key_fingerprint).toBe(FP);
     expect(calls[0].body).not.toContain('AIza');

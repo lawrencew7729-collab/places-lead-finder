@@ -156,6 +156,26 @@ describe('R1 CENTRALIZED — 50-attempt server-side cap + usage bridge', () => {
     expect(Number(usage)).toBe(50);
   });
 
+  it('B2: run starting at 899 + 50 claims = exactly 949 (app-originated monthly max); claim #51 rejected', async () => {
+    const { redis } = createMemoryRedis();
+    const h = handlerFor(redis);
+    // RUN authorized at 899 (below safety stop 900) -> session opens
+    await redis.set(tenantUsageKey(TENANT_A, MONTH), '899');
+    await redis.set(tenantActiveSearchKey(TENANT_A), JSON.stringify({ sessionId: 'sess-A', attempts: 0 }), 'EX', '120');
+    let issued = 0;
+    for (let i = 1; i <= MAX_SESSION_REQUESTS + 1; i++) {
+      const r = makeRes();
+      await h(makeReq({ mode: 'claim', sessionId: 'sess-A' }), r.res);
+      if (r.json().ok) issued++;
+      else expect(r.json().reason).toBe('cap');
+    }
+    expect(issued).toBe(MAX_SESSION_REQUESTS); // exactly 50
+    const usage = await redis.get(tenantUsageKey(TENANT_A, MONTH));
+    expect(Number(usage)).toBe(949); // 899 + 50 = 949 < 1000 Enterprise free cap
+    // subsequent RUN at >= 900 is blocked by the usage handler (floor 949 >= 900)
+    expect(Number(usage)).toBeGreaterThanOrEqual(900);
+  });
+
   it('crash-safety: usage bridge retains increments with NO release callback', async () => {
     const { redis } = createMemoryRedis();
     const h = handlerFor(redis);
