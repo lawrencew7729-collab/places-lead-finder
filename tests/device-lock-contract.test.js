@@ -27,14 +27,23 @@ function createKv() {
   const fetchMock = vi.fn(async (url, init = {}) => {
     calls.push({ url: String(url), method: init.method ?? 'GET', body: init.body ?? null });
     const u = String(url);
-    const args = init.body ? JSON.parse(init.body) : [];
-    if (u.endsWith('/get')) {
-      const raw = store.has(args[0]) ? JSON.stringify(store.get(args[0])) : null;
+    // Upstash REST path-style: /<command>/<arg1>/<arg2>... (URL-encoded)
+    const segs = u.split('/').slice(3).map((s) => decodeURIComponent(s));
+    const command = segs[0];
+    if (command === 'get') {
+      const raw = store.has(segs[1]) ? JSON.stringify(store.get(segs[1])) : null;
       return { ok: true, status: 200, json: async () => ({ result: raw }) };
     }
-    if (u.endsWith('/set')) {
-      store.set(args[0], JSON.parse(args[1]));
+    if (command === 'set') {
+      store.set(segs[1], JSON.parse(segs[2]));
       return { ok: true, status: 200, json: async () => ({ result: 'OK' }) };
+    }
+    if (command === 'del') {
+      for (const k of segs.slice(1)) store.delete(k);
+      return { ok: true, status: 200, json: async () => ({ result: 1 }) };
+    }
+    if (command === 'eval') {
+      return { ok: true, status: 200, json: async () => ({ result: 1 }) };
     }
     throw new Error('unexpected kv url ' + u);
   });
