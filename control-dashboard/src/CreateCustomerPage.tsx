@@ -79,6 +79,11 @@ export function CreateCustomerPage({
   const [keyVisible, setKeyVisible] = useState(false);
   const [fingerprint, setFingerprint] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  // OWNER FINAL DECISION 1/A — authenticated operator confirms the EXACT
+  // generated website restriction after configuring it face-to-face in the
+  // customer's own Google Console. UI-state only: real provisioning runs via
+  // the operator CLI, which enforces the same checkpoint independently.
+  const [restrictionConfirmed, setRestrictionConfirmed] = useState(false);
   const [verification, setVerification] = useState<ReturnType<typeof validateCreateCustomerForm> | null>(null);
   const [duplicateSlug, setDuplicateSlug] = useState<DuplicateSlugCheck | null>(null);
   const [verifyError, setVerifyError] = useState('');
@@ -300,6 +305,19 @@ export function CreateCustomerPage({
               <ClipboardCopy size={14} /> {copied ? 'COPIED' : 'COPY'}
             </button>
           </div>
+          <label className="restriction-checkpoint" data-testid="restriction-confirm-label">
+            <input
+              type="checkbox"
+              data-testid="restriction-confirm"
+              checked={restrictionConfirmed}
+              disabled={!restriction}
+              onChange={(event) => setRestrictionConfirmed(event.target.checked)}
+            />
+            <span>
+              I have configured this exact Website Restriction in the customer&apos;s Google Console.
+              {restrictionConfirmed && <BadgeCheck size={14} className="inline-ok" />}
+            </span>
+          </label>
         </section>
 
         <section className="panel">

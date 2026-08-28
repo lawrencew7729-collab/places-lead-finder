@@ -42,6 +42,8 @@ function input(overrides: Partial<Parameters<typeof runProvisioning>[1]> = {}) {
     goldenRelease: GOLDEN,
     executionGate: true,
     centralStore: true,
+    websiteRestrictionConfirmed: true,
+    realPortalSmokeConfirmed: true,
     centralStoreUrl: CENTRAL_STORE,
     billingAccountId: BILLING_ACCOUNT,
     wif: WIF,
@@ -271,6 +273,102 @@ describe('R1 provisioning executor (15-stage PRE-R1 model)', () => {
     // quota stage itself passed (runtime == persisted contract)
     expect(result.stages[10].status).toBe('PASS');
     expect(result.stages[10].id).toBe('quota');
+  });
+
+  it('restriction checkpoint HOLD: missing operator confirmation → NOT READY (no silent PASS)', async () => {
+    const providers = createFakeProviders();
+    await registerGolden(providers);
+    const result = await runProvisioning(providers, input({ websiteRestrictionConfirmed: false }), transient());
+    expect(result.outcome).toBe('FAILED');
+    expect(result.failedStageId).toBe('restriction');
+    expect(result.stages.find((s) => s.id === 'restriction')?.detail).toContain('OWNER ACTION REQUIRED');
+  });
+
+  it('restriction checkpoint PASS requires the exact subdomain restriction + explicit confirmation', async () => {
+    const providers = createFakeProviders();
+    await registerGolden(providers);
+    const result = await runProvisioning(providers, input({ websiteRestrictionConfirmed: true }), transient());
+    expect(result.outcome).toBe('CUSTOMER_READY');
+    const restrictionStage = result.stages.find((s) => s.id === 'restriction');
+    expect(restrictionStage?.status).toBe('PASS');
+    expect(restrictionStage?.resourceId).toBe('https://abc.leadfinder.business/*');
+  });
+
+  it('restriction format: broad wildcard / unrelated domain / apex are refused by the provider', async () => {
+    const providers = createFakeProviders();
+    await registerGolden(providers);
+    // direct adapter-level check (the executor always derives the exact form from slug)
+    const bad1 = await providers.google.verifyReferrer('abc-leadfinder-1234', 'https://*.leadfinder.business/*');
+    const bad2 = await providers.google.verifyReferrer('abc-leadfinder-1234', 'https://example.com/*');
+    const bad3 = await providers.google.verifyReferrer('abc-leadfinder-1234', 'https://leadfinder.business/*');
+    const bad4 = await providers.google.verifyReferrer('abc-leadfinder-1234', 'https://abc.leadfinder.business/');
+    expect(bad1.ok).toBe(false);
+    expect(bad2.ok).toBe(false);
+    expect(bad3.ok).toBe(false);
+    expect(bad4.ok).toBe(false);
+    const good = await providers.google.verifyReferrer('abc-leadfinder-1234', 'https://abc.leadfinder.business/*');
+    expect(good.ok).toBe(true);
+  });
+
+  it('smoke requires the real API key: absent transient key → usage_smoke FAIL (owner correction)', async () => {
+    const providers = createFakeProviders();
+    await registerGolden(providers);
+    // first run: key captured + runtime handoff (env baked) → CUSTOMER_READY
+    const first = await runProvisioning(providers, input(), transient());
+    expect(first.outcome).toBe('CUSTOMER_READY');
+    // resume run WITHOUT the transient key (key env still present, but the
+    // referrer-acceptance preflight needs the real key in the handoff) → FAIL
+    const result = await runProvisioning(providers, input(), { deviceLockSecrets: transient().deviceLockSecrets });
+    expect(result.outcome).toBe('FAILED');
+    expect(result.failedStageId).toBe('usage_smoke');
+    expect(result.stages.find((s) => s.id === 'usage_smoke')?.detail).toContain('referrer-acceptance preflight did not pass');
+  });
+
+  it('referrer-denied preflight (incompatible/mismatched restriction behavior) → FAIL at usage_smoke', async () => {
+    const providers = createFakeProviders();
+    await registerGolden(providers);
+    providers.setFailures(['usageSmoke.places']); // simulates REQUEST_DENIED (restriction not configured/mismatched)
+    const result = await runProvisioning(providers, input(), transient());
+    expect(result.outcome).toBe('FAILED');
+    expect(result.failedStageId).toBe('usage_smoke');
+  });
+
+  it('smoke success cannot bypass a missing restriction confirmation (stage 9 HOLD first)', async () => {
+    const providers = createFakeProviders();
+    await registerGolden(providers);
+    // all smoke signals healthy, but confirmation=false → the run must HOLD at
+    // restriction (stage 9) BEFORE any smoke can run
+    const result = await runProvisioning(providers, input({ websiteRestrictionConfirmed: false }), transient());
+    expect(result.outcome).toBe('FAILED');
+    expect(result.failedStageId).toBe('restriction');
+    expect(result.stages.find((s) => s.id === 'usage_smoke')?.status).not.toBe('PASS');
+  });
+
+  it('real Customer Portal smoke HOLD: preflight PASS + no operator browser confirmation → OWNER ACTION REQUIRED', async () => {
+    const providers = createFakeProviders();
+    await registerGolden(providers);
+    // probe + all 10 HTTP checks PASS, but the operator has NOT performed the
+    // real browser smoke → the preflight alone must NOT produce readiness
+    const result = await runProvisioning(providers, input({ realPortalSmokeConfirmed: false }), transient());
+    expect(result.outcome).toBe('FAILED');
+    expect(result.failedStageId).toBe('usage_smoke');
+    const detail = result.stages.find((s) => s.id === 'usage_smoke')?.detail ?? '';
+    expect(detail).toContain('OWNER ACTION REQUIRED: real Customer Portal browser smoke');
+    expect(detail).toContain('https://abc.leadfinder.business');
+  });
+
+  it('real Customer Portal smoke resume: after operator browser confirmation → CUSTOMER_READY', async () => {
+    const providers = createFakeProviders();
+    await registerGolden(providers);
+    // first run: probe passes but real portal smoke not yet confirmed
+    const first = await runProvisioning(providers, input({ realPortalSmokeConfirmed: false }), transient());
+    expect(first.outcome).toBe('FAILED');
+    expect(first.failedStageId).toBe('usage_smoke');
+    // operator performed the real browser search → resume with the explicit
+    // confirmation (same tenant identity, idempotent)
+    const second = await runProvisioning(providers, input({ realPortalSmokeConfirmed: true }), transient());
+    expect(second.outcome).toBe('CUSTOMER_READY');
+    expect(second.tenantId).toBe(first.tenantId);
   });
 
   it('WIF onboarding stages run and record the exact customer SA identity', async () => {

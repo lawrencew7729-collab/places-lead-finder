@@ -122,7 +122,26 @@ export async function runOperatorCli(deps: OperatorCliDeps): Promise<OperatorCli
   const confirmed = await deps.io.confirm(`Provision NEW customer — verify:\n${summary}\n\nProceed? (yes/no): `);
   if (!confirmed) return { outcome: 'ABORTED', reason: 'operator declined confirmation' };
 
-  // 5. ONE provisioning job per tenant.
+  // 5. OWNER FINAL DECISION 1 (2026-08-27) — WEBSITE RESTRICTION CHECKPOINT.
+  // Face-to-face: the CUSTOMER logs into their OWN Google account (never the
+  // operator's, never Lead Finder's) and, with operator assistance, confirms
+  // the Places API key exists and its website restriction equals the exact
+  // customer subdomain. Google exposes no authoritative API readback, so the
+  // checkpoint requires the operator's explicit confirmation — the executor
+  // HOLDs at the restriction stage otherwise. No customer password/credential
+  // is ever collected; the customer keeps full control of their account and
+  // billing (owner final decision 2).
+  const restriction = `https://${deps.args.slug}.leadfinder.business/*`;
+  const restrictionConfirmedAt = new Date().toISOString(); // checkpoint timestamp (audit evidence)
+  const restrictionConfirmed = await deps.io.confirm(
+    `WEBSITE RESTRICTION CHECKPOINT (face-to-face, customer's own Google Console):\n` +
+    `The customer's Places API key must exist and its website restriction must be EXACTLY:\n  ${restriction}\n` +
+    `Customer logs in themselves; Lead Finder never collects their password or account access.\n` +
+    `Has the exact restriction been configured and verified together? (yes/no): `,
+  );
+  if (!restrictionConfirmed) return { outcome: 'ABORTED', reason: 'operator declined the website restriction checkpoint — HOLD until the exact restriction is configured face-to-face' };
+
+  // 6. ONE provisioning job per tenant.
   const lockResult = await deps.lock.acquire(deps.args.slug);
   if (!lockResult.ok) return { outcome: 'REFUSED', reason: (lockResult as { reason: string }).reason };
 
@@ -143,6 +162,7 @@ export async function runOperatorCli(deps: OperatorCliDeps): Promise<OperatorCli
     centralStore: true,
     centralStoreUrl: deps.env.CENTRAL_STORE_URL!,
     billingAccountId: deps.args.billingAccountId,
+    websiteRestrictionConfirmed: true, // face-to-face checkpoint passed (owner final decision 1)
     wif: {
       pool: deps.env.WIF_POOL!,
       provider: deps.env.WIF_PROVIDER!,
@@ -153,8 +173,39 @@ export async function runOperatorCli(deps: OperatorCliDeps): Promise<OperatorCli
   };
 
   let result: ProvisioningResult;
+  let realPortalSmokeConfirmedAt: string | null = null;
   try {
+    // OWNER CORRECTION 2026-08-27 — FINAL real Customer Portal smoke is an
+    // OPERATOR-ASSISTED browser checkpoint. The first run stops at the
+    // usage_smoke stage (referrer-acceptance preflight PASS is NOT proof of
+    // the portal browser runtime). The operator then opens the deployed portal
+    // at the exact origin in a real browser, performs ONE bounded real Places
+    // search through the NORMAL portal runtime and confirms a successful
+    // result; the run RESUMES with the explicit confirmation. A preflight
+    // PASS alone can never produce CUSTOMER_READY.
     result = await runProvisioning(deps.providers, input, { placesApiKey: rawPlacesKey, deviceLockSecrets: { appPass } });
+    if (
+      result.outcome === 'FAILED' &&
+      result.failedStageId === 'usage_smoke' &&
+      (result.stages.find((s) => s.id === 'usage_smoke')?.detail ?? '').includes('OWNER ACTION REQUIRED: real Customer Portal browser smoke')
+    ) {
+      const realSmoke = await deps.io.confirm(
+        `REAL CUSTOMER PORTAL SMOKE CHECKPOINT (owner correction 2026-08-27):\n` +
+        `Open https://${result.hostname} in a REAL browser, use the actual deployed Customer Portal,\n` +
+        `perform ONE bounded real Places search through the normal browser runtime, and confirm a\n` +
+        `successful result. (The server-side referrer preflight alone is NOT sufficient.)\n` +
+        `DEVICE-SLOT RULE (owner review): this smoke MUST be performed on the CUSTOMER'S OWN intended\n` +
+        `first production device — the customer is physically present and uses their own\n` +
+        `laptop/desktop/device. That device becoming Device Slot 1 is ACCEPTED and intentional.\n` +
+        `An operator-owned laptop/browser must NOT be used for the final activation smoke.\n` +
+        `Device Slot 2 remains available for the customer's second device.\n` +
+        `Did the real portal search succeed on the customer's own device? (yes/no): `,
+      );
+      if (!realSmoke) return { outcome: 'ABORTED', reason: 'real Customer Portal browser smoke NOT confirmed — HOLD / NOT READY (preflight PASS alone is not sufficient)' };
+      realPortalSmokeConfirmedAt = new Date().toISOString();
+      input.realPortalSmokeConfirmed = true;
+      result = await runProvisioning(deps.providers, input, { placesApiKey: rawPlacesKey, deviceLockSecrets: { appPass } });
+    }
   } finally {
     await deps.lock.release(deps.args.slug);
   }
@@ -167,6 +218,18 @@ export async function runOperatorCli(deps: OperatorCliDeps): Promise<OperatorCli
     provisionedAt: new Date().toISOString(),
     tenant: { slug: deps.args.slug, hostname: result.hostname, tenantId: result.tenantId },
     release: { tag: deps.args.releaseTag, commitSha: deps.args.releaseCommitSha, artifactSha256: deps.args.releaseArtifactSha256 },
+    // OWNER FINAL DECISION 1/A audit evidence: tenant + EXACT generated
+    // restriction + AUTHENTICATED operator identity (from OPERATOR_USER_ID —
+    // never typed by hand) + confirmation timestamp + stage/result. Simple,
+    // reusing the existing evidence sink (no new audit subsystem).
+    websiteRestriction: `https://${result.hostname}/*`,
+    websiteRestrictionConfirmed: true,
+    websiteRestrictionConfirmedAt: restrictionConfirmedAt,
+    // OWNER CORRECTION 2026-08-27 — real Customer Portal browser smoke
+    // evidence: operator identity + timestamp + PASS/FAIL (non-secret only).
+    realPortalSmokeConfirmed: realPortalSmokeConfirmedAt !== null,
+    realPortalSmokeConfirmedAt,
+    operator: { id: deps.env.OPERATOR_USER_ID },
     outcome: result.outcome,
     failedStageId: result.failedStageId,
     stages: result.stages.map((s) => ({ id: s.id, status: s.status, detail: s.detail, resourceId: s.resourceId })),

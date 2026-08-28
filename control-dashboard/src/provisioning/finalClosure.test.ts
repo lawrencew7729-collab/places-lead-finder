@@ -33,6 +33,8 @@ function input() {
     goldenRelease: GOLDEN,
     executionGate: true,
     centralStore: true,
+    websiteRestrictionConfirmed: true,
+    realPortalSmokeConfirmed: true,
     centralStoreUrl: 'https://central.example.com',
     billingAccountId: '01B61E-759031-B494E4',
     wif: {
@@ -455,7 +457,36 @@ describe('R1 final closure — real server-side adapters', () => {
     expect(calls.every((c) => !(c.url + (c.body ?? '')).includes('admin-tok'))).toBe(true);
   });
 
-  it('Usage smoke adapter: full 10-point sequence against the deployed app', async () => {
+  it('Usage smoke adapter: 11-point sequence — server-side referrer-acceptance preflight (NOT a browser-runtime proof)', async () => {
+    const { transport, calls } = createFakeTransport([
+      { urlPrefix: 'https://abc.leadfinder.business/', body: '<!DOCTYPE html><html>' },
+      { urlPrefix: '/api/usage', body: { used: 0, cap: 1000, safetyStop: 900, month: '2026-08', sessionId: 'sess-1', maxSessionRequests: 50, source: 'monitoring' } },
+      { urlPrefix: '/api/session?mode=status', body: { active: true, sessionId: 'sess-1', used: 0 } },
+      { urlPrefix: '/api/session?mode=release', body: { ok: true } },
+      { urlPrefix: '/api/session?mode=status', body: { active: false, used: 0 } },
+      { urlPrefix: '/api/device?mode=probe', body: { mode: 'locked', maxDevices: 2, kvConfigured: true, appPassConfigured: true, tenantIdConfigured: true } },
+      { urlPrefix: 'https://places.googleapis.com/v1/places/', body: { id: 'ChIJj61dQgK6j4AR4GeTYWZsKWw' } },
+    ]);
+    const adapter = createUsageSmokeAdapter({ transport });
+    const res = await adapter.run('abc.leadfinder.business', 'AIzaSyA_TEST_KEY_0000000000000000000000');
+    expect(res.ok).toBe(true);
+    expect(res.smoke?.capIs1000).toBe(true);
+    expect(res.smoke?.safetyStopIs900).toBe(true);
+    expect(res.smoke?.maxSessionIs50).toBe(true);
+    expect(res.smoke?.monitoringSource).toBe(true);
+    expect(res.smoke?.tenantIdentityExact).toBe(true);
+    expect(res.smoke?.noActiveLeaseAfterRelease).toBe(true);
+    expect(res.smoke?.deviceProbeLocked).toBe(true);
+    expect(res.smoke?.referrerAcceptanceProbe).toBe(true);
+    // the probe request carries the browser-like exact-origin Referer and the customer key
+    const placesCall = calls.find((c) => c.url.includes('places.googleapis.com'));
+    expect(placesCall?.headers?.Referer).toBe('https://abc.leadfinder.business/');
+    expect(placesCall?.url).toContain('AIzaSyA_TEST_KEY');
+    // the raw key never enters the serializable report/reason
+    expect(JSON.stringify(res.smoke)).not.toContain('AIzaSy');
+  });
+
+  it('Usage smoke adapter fails closed WITHOUT the real key (preflight before key capture/runtime handoff)', async () => {
     const { transport } = createFakeTransport([
       { urlPrefix: 'https://abc.leadfinder.business/', body: '<!DOCTYPE html><html>' },
       { urlPrefix: '/api/usage', body: { used: 0, cap: 1000, safetyStop: 900, month: '2026-08', sessionId: 'sess-1', maxSessionRequests: 50, source: 'monitoring' } },
@@ -466,14 +497,26 @@ describe('R1 final closure — real server-side adapters', () => {
     ]);
     const adapter = createUsageSmokeAdapter({ transport });
     const res = await adapter.run('abc.leadfinder.business');
-    expect(res.ok).toBe(true);
-    expect(res.smoke?.capIs1000).toBe(true);
-    expect(res.smoke?.safetyStopIs900).toBe(true);
-    expect(res.smoke?.maxSessionIs50).toBe(true);
-    expect(res.smoke?.monitoringSource).toBe(true);
-    expect(res.smoke?.tenantIdentityExact).toBe(true);
-    expect(res.smoke?.noActiveLeaseAfterRelease).toBe(true);
-    expect(res.smoke?.deviceProbeLocked).toBe(true);
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error('expected smoke failure');
+    expect((res as { reason: string }).reason).toContain('real customer API key missing');
+  });
+
+  it('Usage smoke adapter fails closed when the referrer restriction denies the exact origin (REQUEST_DENIED)', async () => {
+    const { transport } = createFakeTransport([
+      { urlPrefix: 'https://abc.leadfinder.business/', body: '<!DOCTYPE html><html>' },
+      { urlPrefix: '/api/usage', body: { used: 0, cap: 1000, safetyStop: 900, month: '2026-08', sessionId: 'sess-1', maxSessionRequests: 50, source: 'monitoring' } },
+      { urlPrefix: '/api/session?mode=status', body: { active: true, sessionId: 'sess-1', used: 0 } },
+      { urlPrefix: '/api/session?mode=release', body: { ok: true } },
+      { urlPrefix: '/api/session?mode=status', body: { active: false, used: 0 } },
+      { urlPrefix: '/api/device?mode=probe', body: { mode: 'locked', maxDevices: 2, kvConfigured: true, appPassConfigured: true, tenantIdConfigured: true } },
+      { urlPrefix: 'https://places.googleapis.com/v1/places/', status: 403, body: { error: { status: 'PERMISSION_DENIED' } } },
+    ]);
+    const adapter = createUsageSmokeAdapter({ transport });
+    const res = await adapter.run('abc.leadfinder.business', 'AIzaSyA_TEST_KEY_0000000000000000000000');
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error('expected smoke failure');
+    expect((res as { reason: string }).reason).toContain('referrer restriction denied');
   });
 
   it('Usage smoke adapter fails closed when /api/usage is blocked or locked', async () => {

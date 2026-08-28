@@ -95,6 +95,20 @@ describe('PRE-R1 operator CLI host', () => {
     expect(locks.size).toBe(0);
   });
 
+  it('ABORTED at the website-restriction checkpoint when the operator cannot confirm the exact restriction (owner final decision 1)', async () => {
+    const { base, locks } = deps();
+    // first confirm (tenant summary) = yes; second confirm (restriction checkpoint) = no
+    let calls = 0;
+    const confirm = async () => {
+      calls += 1;
+      return calls === 1;
+    };
+    const result = await runOperatorCli({ ...base, io: { ...base.io, confirm } });
+    expect(result.outcome).toBe('ABORTED');
+    expect(result.reason).toContain('website restriction checkpoint');
+    expect(locks.size).toBe(0);
+  });
+
   it('REFUSED when another provisioning job holds the tenant lock', async () => {
     const { base, locks } = deps();
     locks.add('abc');
@@ -120,6 +134,66 @@ describe('PRE-R1 operator CLI host', () => {
     expect(serialized).toContain('abc.leadfinder.business');
     expect(serialized).toContain('CUSTOMER_READY');
     expect(serialized).toContain('rollbackMetadata');
+    // OWNER DECISIONS 1/A audit evidence: tenant + EXACT generated restriction
+    // + AUTHENTICATED operator identity + confirmation timestamp
+    expect(serialized).toContain('https://abc.leadfinder.business/*');
+    expect(serialized).toContain('"operator":{"id":"value-OPERATOR_USER_ID"}');
+    expect(serialized).toContain('websiteRestrictionConfirmed');
+    const confirmedAt = (evidence[0] as { websiteRestrictionConfirmedAt?: string }).websiteRestrictionConfirmedAt;
+    expect(typeof confirmedAt).toBe('string');
+    expect(new Date(confirmedAt as string).getTime()).not.toBeNaN();
+  });
+
+  it('real Customer Portal smoke: two-stage CLI flow — probe PASS alone stops; operator browser confirmation resumes to CUSTOMER_READY', async () => {
+    const { base, evidence, providers } = deps();
+    await providers.controlPlane.insertRelease(GOLDEN);
+    // confirm sequence: tenant summary (1) → restriction checkpoint (2) → real
+    // portal smoke (3, after the first run stops at usage_smoke)
+    let calls = 0;
+    const confirm = async () => {
+      calls += 1;
+      return true; // operator confirms all three
+    };
+    const result = await runOperatorCli({ ...base, io: { ...base.io, confirm } });
+    expect(calls).toBe(3);
+    expect(result.outcome).toBe('CUSTOMER_READY');
+    const serialized = JSON.stringify(evidence[0]);
+    // audit evidence: real portal smoke confirmed by the AUTHENTICATED operator
+    expect(serialized).toContain('"realPortalSmokeConfirmed":true');
+    expect(serialized).toContain('realPortalSmokeConfirmedAt');
+  });
+
+  it('real Customer Portal smoke: operator declines the browser checkpoint → ABORTED (HOLD / NOT READY, preflight alone insufficient)', async () => {
+    const { base, locks, providers } = deps();
+    await providers.controlPlane.insertRelease(GOLDEN);
+    let calls = 0;
+    const confirm = async () => {
+      calls += 1;
+      return calls !== 3; // decline ONLY the real portal smoke checkpoint
+    };
+    const result = await runOperatorCli({ ...base, io: { ...base.io, confirm } });
+    expect(result.outcome).toBe('ABORTED');
+    expect(result.reason).toContain('real Customer Portal browser smoke NOT confirmed');
+    expect(locks.size).toBe(0); // lock released even on abort
+  });
+
+  it('device-slot rule: the real portal smoke instruction requires the CUSTOMER OWN first production device (operator device not acceptable)', async () => {
+    const { base, providers } = deps();
+    await providers.controlPlane.insertRelease(GOLDEN);
+    const questions: string[] = [];
+    const confirm = async (q: string) => {
+      questions.push(q);
+      return true;
+    };
+    const result = await runOperatorCli({ ...base, io: { ...base.io, confirm } });
+    expect(result.outcome).toBe('CUSTOMER_READY');
+    const smokePrompt = questions.find((q) => q.includes('REAL CUSTOMER PORTAL SMOKE')) ?? '';
+    // the operator instruction explicitly requires the customer's OWN device
+    expect(smokePrompt).toContain("CUSTOMER'S OWN");
+    expect(smokePrompt).toContain('first production device');
+    expect(smokePrompt).toContain('operator-owned laptop/browser must NOT be used');
+    expect(smokePrompt).toContain('Device Slot 2 remains available');
+    expect(smokePrompt).toContain("customer's own device");
   });
 
   it('refuses invalid slug / billing account id before any prompt', async () => {

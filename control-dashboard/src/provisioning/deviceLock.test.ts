@@ -38,6 +38,8 @@ function input(overrides: Record<string, unknown> = {}) {
     goldenRelease: GOLDEN,
     executionGate: true,
     centralStore: true,
+    websiteRestrictionConfirmed: true,
+    realPortalSmokeConfirmed: true,
     centralStoreUrl: STORE_A,
     billingAccountId: '01B61E-759031-B494E4',
     wif: WIF,
@@ -131,12 +133,16 @@ describe('R1 TWO-DEVICE CONTRACT — provisioning integration (CENTRAL model)', 
     expect(result.failedStageId).toBe('acl');
   });
 
-  it('resume path (already configured deployment) passes WITHOUT re-entering secrets', async () => {
+  it('resume path (already configured deployment) passes WITHOUT re-entering ACL/APP_PASS secrets', async () => {
     const providers = createFakeProviders();
     await providers.controlPlane.insertRelease(GOLDEN);
     const first = await runProvisioning(providers, input(), transient());
     expect(first.outcome).toBe('CUSTOMER_READY');
-    const second = await runProvisioning(providers, input()); // no secrets — already configured
+    // resume: ACL store credential + APP_PASS already configured → acl stage
+    // skips re-provisioning without those secrets. The Places key MUST still
+    // be re-supplied transiently (owner final decision C: the exact-origin
+    // smoke step needs the real key — fail-closed otherwise).
+    const second = await runProvisioning(providers, input(), { placesApiKey: transient().placesApiKey });
     expect(second.outcome).toBe('CUSTOMER_READY');
     // deterministic tenant identity: same slug → same tenantId → same registry namespace
     expect(second.tenantId).toBe(first.tenantId);

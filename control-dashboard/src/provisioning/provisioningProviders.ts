@@ -190,7 +190,18 @@ export interface HealthProvider {
   smokeCheck(hostname: string): Promise<ProviderResult>;
 }
 
-/** PRE-R1 — functional activation smoke: 10-point black-box HTTPS verification. */
+/**
+ * PRE-R1 — functional activation smoke report. Points 1–10 are black-box HTTP
+ * checks of the deployed app. Point 11 is the SERVER-SIDE REFERRER-ACCEPTANCE
+ * PREFLIGHT (owner correction 2026-08-27): ONE bounded real Places request
+ * from the exact origin with the customer key proves the Google referrer
+ * restriction admits the origin — it does NOT prove the Customer Portal
+ * browser runtime works. The FINAL real Customer Portal smoke is an explicit
+ * OPERATOR-ASSISTED browser checkpoint (realPortalSmokeConfirmed in the
+ * executor): the operator opens the deployed portal from the exact origin,
+ * performs ONE bounded real Places search in the normal browser runtime and
+ * confirms a successful result. A probe PASS alone can never reach readiness.
+ */
 export interface UsageSmokeReport {
   domainHealthy: boolean;
   usageStructured: boolean;
@@ -203,10 +214,16 @@ export interface UsageSmokeReport {
   tenantIdentityExact: boolean;
   /** after compare-and-release, /api/session status reports NO active lease. */
   noActiveLeaseAfterRelease: boolean;
+  /** server-side referrer-acceptance PREFLIGHT (bounded): the customer key + exact-origin Referer are accepted by Google's referrer restriction. NOT a browser-runtime proof. */
+  referrerAcceptanceProbe: boolean;
 }
 
 export interface UsageSmokeProvider {
-  run(hostname: string): Promise<ProviderResult & { smoke?: UsageSmokeReport }>;
+  /**
+   * @param hostname exact customer origin (no scheme)
+   * @param placesApiKey transient raw customer key — absent ⇒ referrerAcceptanceProbe fails closed
+   */
+  run(hostname: string, placesApiKey?: string): Promise<ProviderResult & { smoke?: UsageSmokeReport }>;
 }
 
 export interface ProvisioningProviders {
@@ -348,7 +365,11 @@ export function createFakeProviders(options: { failAt?: string[] } = {}): FakePr
       async verifyReferrer(googleProjectId, restrictionExact) {
         const fail = maybeFail('google.verifyReferrer');
         if (fail) return fail;
-        if (!restrictionExact.endsWith('/*')) return { ok: false, reason: 'exact wildcard restriction required' };
+        // EXACT single-subdomain form only — a wrong subdomain, broad wildcard
+        // (e.g. https://*.leadfinder.business/*) or unrelated domain is refused.
+        if (!/^https:\/\/[a-z0-9-]+\.leadfinder\.business\/\*$/.test(restrictionExact)) {
+          return { ok: false, reason: 'exact wildcard referrer restriction required (single customer subdomain)' };
+        }
         return { ok: true, resourceId: restrictionExact };
       },
       async grantMonitoringViewer(googleProjectId, customerMonitoringSa) {
@@ -613,7 +634,7 @@ export function createFakeProviders(options: { failAt?: string[] } = {}): FakePr
       },
     },
     usageSmoke: {
-      async run(hostname) {
+      async run(hostname, placesApiKey) {
         const fail = maybeFail('usageSmoke.run');
         if (fail) return fail;
         const projectId = domains.get(hostname);
@@ -621,6 +642,14 @@ export function createFakeProviders(options: { failAt?: string[] } = {}): FakePr
         if (usageSmokeFailHosts.has(hostname) || !configured) {
           return { ok: false, reason: 'usage smoke failed (deployment not configured)' };
         }
+        // 11th point (owner correction 2026-08-27): the SERVER-SIDE
+        // referrer-acceptance PREFLIGHT needs the real key in the transient
+        // handoff — fail-closed before key capture/runtime handoff. Simulates
+        // Google's referrer check: key present + not in the injected-failure
+        // set ⇒ the exact origin is accepted.
+        let referrerAcceptanceProbe = typeof placesApiKey === 'string' && placesApiKey.length > 0;
+        const placesFail = maybeFail('usageSmoke.places');
+        if (placesFail) referrerAcceptanceProbe = false;
         return {
           ok: true,
           resourceId: hostname,
@@ -634,6 +663,7 @@ export function createFakeProviders(options: { failAt?: string[] } = {}): FakePr
             deviceProbeLocked: true,
             tenantIdentityExact: true,
             noActiveLeaseAfterRelease: true,
+            referrerAcceptanceProbe,
           },
         };
       },

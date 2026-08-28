@@ -81,6 +81,30 @@ export interface ProvisioningInput {
    * provisioned customer SA).
    */
   wif?: WifConfig;
+  /**
+   * OWNER FINAL DECISION 1 (2026-08-27): explicit website-restriction
+   * CHECKPOINT. Google does NOT expose authoritative readback of the API-key
+   * website restriction through this adapter, so the restriction stage never
+   * fakes a PASS: it verifies format/project (bounded) AND requires explicit
+   * operator confirmation (face-to-face, customer's own Google Console) that
+   * the key exists and its website restriction equals
+   * `https://<customer-subdomain>.leadfinder.business/*`. Missing confirmation
+   * → HOLD / NOT READY.
+   */
+  websiteRestrictionConfirmed?: boolean;
+  /**
+   * OWNER CORRECTION (2026-08-27): the FINAL real Customer Portal smoke is an
+   * OPERATOR-ASSISTED BROWSER CHECKPOINT. The server-side referrer-acceptance
+   * preflight (usage_smoke point 11) only proves Google's referrer restriction
+   * admits the exact origin — it does NOT prove the deployed Customer Portal
+   * browser runtime works. After the portal is live at the exact origin, the
+   * operator opens it in a real browser, performs ONE bounded real Places
+   * search through the normal portal runtime and confirms a successful result.
+   * The executor requires this explicit confirmation; a preflight PASS alone
+   * can never produce CUSTOMER_READY. Missing/failed real portal smoke →
+   * HOLD / NOT READY.
+   */
+  realPortalSmokeConfirmed?: boolean;
 }
 
 /** Transient inputs consumed at their stage ONLY and discarded — never serialized. */
@@ -324,9 +348,28 @@ export async function runProvisioning(
   const domainOk = await runStage('domain', () => providers.vercel.bindDomain(projectId, hostname));
   if (!domainOk) return finish(providers, tenantId, hostname, stages, rollbackMetadata);
 
-  // Stage 9 — exact website restriction verification (bounded read-only).
+  // Stage 9 — exact website restriction CHECKPOINT (owner final decision 1,
+  // 2026-08-27). Google exposes NO authoritative API readback of the API-key
+  // website restriction, so this stage NEVER fakes a PASS:
+  //   (a) bounded verification — the customer project exists AND the intended
+  //       restriction is the exact single-subdomain form
+  //       https://<customer-subdomain>.leadfinder.business/* (a wrong subdomain,
+  //       broad wildcard or unrelated domain is refused by the pattern);
+  //   (b) EXPLICIT operator confirmation (face-to-face, customer's own Google
+  //       Console) that the key exists and the restriction matches EXACTLY.
+  // Missing/wrong/unverified → HOLD / NOT READY (fail-closed).
   const restriction = `https://${hostname}/*`;
-  const restrictionOk = await runStage('restriction', () => providers.google.verifyReferrer(input.googleProjectId.trim(), restriction));
+  const restrictionOk = await runStage('restriction', async () => {
+    const verified = await providers.google.verifyReferrer(input.googleProjectId.trim(), restriction);
+    if (!verified.ok) return verified;
+    if (input.websiteRestrictionConfirmed !== true) {
+      return {
+        ok: false,
+        reason: 'OWNER ACTION REQUIRED: website restriction not confirmed — operator must confirm face-to-face in the customer Google Console that the key exists and the website restriction equals ' + restriction,
+      };
+    }
+    return { ok: true, resourceId: restriction };
+  });
   if (!restrictionOk) return finish(providers, tenantId, hostname, stages, rollbackMetadata);
 
   // Stage 10 — Shared Monitoring grants on the exact customer project:
@@ -365,18 +408,45 @@ export async function runProvisioning(
   });
   if (!quotaOk) return finish(providers, tenantId, hostname, stages, rollbackMetadata);
 
-  // Stage 12 — functional activation smoke (10-point, fail-closed): the
-  // DEPLOYED customer app is exercised over HTTPS with its OWN restricted
-  // credential — domain 200, /api/usage structured (cap 1000 / stop 900 /
-  // session 50 / source monitoring), device probe locked, lease ownership
-  // (exact tenant identity), compare-and-release, NO residual lease.
+  // Stage 12 — functional activation smoke (11-point, fail-closed). Points
+  // 1–10: black-box HTTPS checks of the DEPLOYED customer app (domain 200,
+  // /api/usage structured (cap 1000 / stop 900 / session 50 / source
+  // monitoring), device probe locked, lease ownership (exact tenant identity),
+  // compare-and-release, NO residual lease). Point 11: SERVER-SIDE
+  // REFERRER-ACCEPTANCE PREFLIGHT — ONE bounded real Places request with the
+  // customer's own key (transient handoff) from the exact origin. It proves
+  // the referrer restriction admits the origin; it does NOT prove the
+  // Customer Portal browser runtime. OWNER CORRECTION 2026-08-27: the FINAL
+  // real Customer Portal smoke is the OPERATOR-ASSISTED browser checkpoint
+  // (realPortalSmokeConfirmed) — the operator opens the deployed portal,
+  // performs ONE bounded real Places search through the normal runtime and
+  // confirms success. A preflight PASS alone can never reach readiness.
   const smokeOk = await runStage('usage_smoke', async () => {
     if (!providers.usageSmoke) return { ok: false, reason: 'usageSmoke provider required (fail-closed)' };
-    const r = await providers.usageSmoke.run(hostname);
+    // The raw key is consumed TRANSIENTLY for the referrer-acceptance preflight
+    // and never enters stage state, evidence, or logs (same contract as stage 5).
+    const r = await providers.usageSmoke.run(hostname, transient.placesApiKey);
     if (!r.ok) return r;
     if (!r.smoke) return { ok: false, reason: 'usage smoke report missing' };
     const failed = Object.entries(r.smoke).filter(([, v]) => !v).map(([k]) => k);
-    if (failed.length > 0) return { ok: false, reason: `usage smoke failed: ${failed.join(', ')}` };
+    // The referrer-acceptance preflight is checked separately with its own
+    // detailed reason (it requires the REAL transient key + a referrer-
+    // accepting restriction).
+    if (failed.some((k) => k !== 'referrerAcceptanceProbe')) {
+      return { ok: false, reason: `usage smoke failed: ${failed.filter((k) => k !== 'referrerAcceptanceProbe').join(', ')}` };
+    }
+    if (!r.smoke.referrerAcceptanceProbe) {
+      return { ok: false, reason: 'usage smoke failed: referrer-acceptance preflight did not pass (real key must be in the transient handoff and the referrer restriction must admit the exact origin)' };
+    }
+    // OWNER CORRECTION: the FINAL real Customer Portal smoke is the
+    // operator-assisted browser checkpoint — a preflight PASS alone cannot
+    // produce readiness.
+    if (input.realPortalSmokeConfirmed !== true) {
+      return {
+        ok: false,
+        reason: 'OWNER ACTION REQUIRED: real Customer Portal browser smoke not confirmed — operator must open https://' + hostname + ' in a real browser, perform ONE bounded real Places search through the normal portal runtime, confirm a successful result, then confirm PASS',
+      };
+    }
     return { ok: true, resourceId: hostname };
   });
   if (!smokeOk) return finish(providers, tenantId, hostname, stages, rollbackMetadata);

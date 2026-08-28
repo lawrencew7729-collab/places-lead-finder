@@ -33,6 +33,8 @@ function input(overrides: Record<string, unknown> = {}) {
     goldenRelease: GOLDEN,
     executionGate: true,
     centralStore: true,
+    websiteRestrictionConfirmed: true,
+    realPortalSmokeConfirmed: true,
     centralStoreUrl: 'https://central.example.com',
     billingAccountId: '01B61E-759031-B494E4',
     wif: WIF,

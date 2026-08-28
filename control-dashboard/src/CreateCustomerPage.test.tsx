@@ -126,6 +126,26 @@ describe('PRE-R1 Create Customer page', () => {
     expect(screen.queryByText('CUSTOMER READY')).not.toBeInTheDocument();
   });
 
+  it('website restriction checkpoint UX: exact generated value + COPY + authenticated operator confirmation checkbox', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    // fill the form so a slug exists
+    await user.type(screen.getByLabelText(/company name/i), 'ABC Trading Sdn Bhd');
+    await user.type(screen.getByLabelText(/Google Cloud Project ID/i), 'abc-leadfinder-1234');
+    // exact generated restriction (never manually typed)
+    expect(screen.getByTestId('website-restriction').textContent).toBe('https://abc.leadfinder.business/*');
+    // COPY control enabled
+    expect(screen.getByTestId('copy-restriction')).toBeEnabled();
+    // confirmation checkbox disabled until a valid restriction exists, then
+    // toggles with the owner-final exact wording
+    const checkbox = screen.getByTestId('restriction-confirm');
+    expect(checkbox).toBeEnabled();
+    expect(screen.getByText(/I have configured this exact Website Restriction in the customer's Google Console/i)).toBeVisible();
+    expect(checkbox).not.toBeChecked();
+    await user.click(checkbox);
+    expect(checkbox).toBeChecked();
+  });
+
   it('16. Run Sheet UI works with deterministic mocked stages', async () => {
     const user = userEvent.setup();
     renderPage();

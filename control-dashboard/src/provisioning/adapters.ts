@@ -48,12 +48,12 @@ export function nodeFetchTransport(): Transport {
   };
 }
 
-/** In-memory fake transport for tests: records calls, consumes scripted responses in order. */
+/** In-memory fake transport for tests: records calls (incl. headers), consumes scripted responses in order. */
 export function createFakeTransport(script: Array<{ urlPrefix: string; status?: number; body?: unknown }>) {
-  const calls: Array<{ url: string; method: string; body?: string }> = [];
+  const calls: Array<{ url: string; method: string; body?: string; headers?: Record<string, string> }> = [];
   const queue = [...script];
   const transport: Transport = async (url, init) => {
-    calls.push({ url, method: init?.method ?? 'GET', body: init?.body });
+    calls.push({ url, method: init?.method ?? 'GET', body: init?.body, headers: init?.headers });
     // case-insensitive prefix match (URL path segments may preserve subcommand case)
     const index = queue.findIndex((s) => url.toLowerCase().includes(s.urlPrefix.toLowerCase()));
     const entry = index >= 0 ? queue.splice(index, 1)[0] : { urlPrefix: '', status: 200, body: {} };
@@ -950,7 +950,19 @@ export function createUsageSmokeAdapter(options: { transport?: Transport } = {})
   }
 
   return {
-    async run(hostname) {
+    // OWNER CORRECTION 2026-08-27: point 11 is the SERVER-SIDE
+    // REFERRER-ACCEPTANCE PREFLIGHT — ONE bounded real Places request from the
+    // exact origin using the customer's OWN key (transient handoff), carrying
+    // Referer `https://<host>/` — a browser-like exact customer origin (the
+    // literal `/*` is the Google restriction PATTERN, not a browser Referer)
+    // requests). It proves the referrer restriction ADMITS the exact origin;
+    // it does NOT prove the Customer Portal browser runtime works. The FINAL
+    // real Customer Portal smoke is a separate OPERATOR-ASSISTED browser
+    // checkpoint in the executor (realPortalSmokeConfirmed). Fail-closed:
+    //   - no key (probe before key capture/runtime handoff) → FAIL
+    //   - referrer denied (incompatible/mismatched restriction behavior) → FAIL
+    // The raw key is used in-memory ONLY and never enters the report or logs.
+    async run(hostname, placesApiKey) {
       const base = `https://${hostname}`;
 
       // 1. customer domain HTTP healthy (HTML shell)
@@ -987,6 +999,36 @@ export function createUsageSmokeAdapter(options: { transport?: Transport } = {})
       const statusAfter = await getJson(`${base}/api/session?mode=status`);
       const noResidualLease = statusAfter.status === 200 && statusAfter.body.active === false;
 
+      // 11. SERVER-SIDE REFERRER-ACCEPTANCE PREFLIGHT (owner correction
+      // 2026-08-27). ONE bounded request with the customer's own key and the
+      // exact-origin Referer (`https://<host>/` — browser-like; the `/*`
+      // wildcard belongs to the Google restriction pattern, not the header).
+      // A 2xx proves the referrer restriction admits the
+      // exact origin with THIS key; REQUEST_DENIED (incompatible, mismatched or
+      // denied referrer-restriction behavior) fails closed. It does NOT
+      // independently prove that a Website Restriction exists at all — an
+      // unrestricted key may also accept the request (existence/exact
+      // configuration are covered by the stage-9 face-to-face confirmation
+      // gate). Absent key ⇒ fail-closed (cannot run
+      // before the real API key capture/runtime handoff). This is NOT a proof
+      // of the Customer Portal browser runtime — the FINAL real portal smoke is
+      // the operator-assisted browser checkpoint (realPortalSmokeConfirmed).
+      // Place Details (New) is the smallest Places surface (~$0.017/1000 — ONE
+      // request).
+      let referrerAcceptanceProbe = false;
+      if (typeof placesApiKey !== 'string' || placesApiKey.length === 0) {
+        // no key — report carries the failure; caller records the reason
+      } else {
+        const places = await transport(
+          `https://places.googleapis.com/v1/places/ChIJj61dQgK6j4AR4GeTYWZsKWw?fields=id&key=${encodeURIComponent(placesApiKey)}`,
+          { headers: { Referer: `${base}/` } },
+        );
+        const placesBody = (await places.json().catch(() => ({}))) as { error?: { status?: string } };
+        referrerAcceptanceProbe = places.ok && places.status === 200 && !placesBody.error;
+        // note: the raw key lives in the URL for this ONE request and is
+        // deliberately NOT echoed anywhere (no report field, no reason text)
+      }
+
       const smoke = {
         domainHealthy: true,
         usageStructured: usage.status === 200 && Number.isFinite(used),
@@ -997,10 +1039,16 @@ export function createUsageSmokeAdapter(options: { transport?: Transport } = {})
         deviceProbeLocked: deviceLocked,
         tenantIdentityExact: identityExact,
         noActiveLeaseAfterRelease: noResidualLease && releasedOk,
+        referrerAcceptanceProbe,
       };
       const failed = Object.entries(smoke).filter(([, v]) => !v).map(([k]) => k);
       if (failed.length > 0) {
-        return { ok: false, reason: `usage smoke failed: ${failed.join(', ')}` };
+        const probeReason = !referrerAcceptanceProbe
+          ? (typeof placesApiKey !== 'string' || placesApiKey.length === 0
+            ? 'referrer-acceptance preflight FAILED: real customer API key missing from the transient handoff (preflight cannot run before key capture/runtime handoff)'
+            : 'referrer-acceptance preflight FAILED: referrer restriction denied the exact origin with the customer key (restriction missing or mismatched)')
+          : '';
+        return { ok: false, reason: `usage smoke failed: ${failed.join(', ')}${probeReason ? ` — ${probeReason}` : ''}` };
       }
       return { ok: true, resourceId: hostname, smoke };
     },
