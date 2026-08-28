@@ -56,6 +56,13 @@ export const DEVICE_LOCK_ENV_KEYS = Object.freeze([
   'CUSTOMER_TENANT_ID',
 ] as const);
 
+/**
+ * PRE-R1 ACL — non-secret full 64-hex SHA-256 fingerprint of the tenant REST
+ * token, written next to the (encrypted) token so provisioning retries and
+ * readbacks can reconcile identity WITHOUT ever reading the raw token.
+ */
+export const KV_REST_API_TOKEN_FINGERPRINT_KEY = 'KV_REST_API_TOKEN_FINGERPRINT' as const;
+
 /** Privileged device-lock secrets — transient provisioning input ONLY. */
 export interface DeviceLockSecretsInput {
   kvRestApiUrl: string;   // dedicated store REST URL (per customer)
@@ -168,6 +175,20 @@ export function verifyDeviceLockSecrets(secrets: DeviceLockSecretsInput | null |
     if (!secrets.appPass || secrets.appPass.length < DEVICE_LOCK_CONTRACT.accessCodeLength) {
       reasons.push(`customer access code required (≥ ${DEVICE_LOCK_CONTRACT.accessCodeLength} chars)`);
     }
+  }
+  return { consistent: reasons.length === 0, reasons };
+}
+
+/**
+ * PRE-R1 — APP_PASS owner-action boundary check. APP_PASS is an OWNER ACTION
+ * secret (generation/possession = operator/owner). The acl stage verifies the
+ * value BEFORE creating any ACL identity so a HOLD never leaves an orphan.
+ * Never reads back / prints the value.
+ */
+export function verifyAppPassSecret(appPass: string | null | undefined): DeviceLockVerificationResult {
+  const reasons: string[] = [];
+  if (!appPass || appPass.length < DEVICE_LOCK_CONTRACT.accessCodeLength) {
+    reasons.push('OWNER ACTION REQUIRED: APP_PASS not configured (customer access code, ≥ 16 chars)');
   }
   return { consistent: reasons.length === 0, reasons };
 }

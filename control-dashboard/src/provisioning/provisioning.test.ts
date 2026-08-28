@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { explicitProvisioningQuota, quotaSignal, verifyQuotaConsistency } from './quotaContract';
 import { refuseMissingRelease, RETIRED_MOCK_RELEASE, verifyGoldenRelease, type GoldenReleaseIdentity } from './releaseRegistry';
 import { runProvisioning, EXECUTION_GATE_REQUIRED } from './executor';
-import { createFakeProviders } from './provisioningProviders';
+import { createFakeProviders, customerMonitoringSaEmail, lastHandedOffDeviceLockSecrets, wifAudienceFor } from './provisioningProviders';
+import { aclUsernameFor } from './aclProvisioning';
 
 const GOLDEN: GoldenReleaseIdentity = {
   version: '1.0.1',
@@ -13,24 +14,43 @@ const GOLDEN: GoldenReleaseIdentity = {
   status: 'approved',
 };
 
-// R1 TWO-DEVICE CONTRACT — per-customer handoff secrets (transient, first run)
-const DEVICE_LOCK_SECRETS = {
-  kvRestApiUrl: 'https://store-a.upstash.io',
-  kvRestApiToken: 'tok_abcdefghijkl',
-  appPass: 'accesscode123456',
+const FP = 'A'.repeat(64);
+const RAW_KEY = 'AIzaSyA_TEST_KEY_0000000000000000000000';
+const APP_PASS = 'accesscode123456';
+const CENTRAL_STORE = 'https://central.example.com';
+const BILLING_ACCOUNT = '01B61E-759031-B494E4';
+const WIF = {
+  pool: 'lf-vercel-wif',
+  provider: 'vercel-oidc',
+  centralProjectNumber: '123456789012',
+  vercelTeamSlug: 'lawrencew7729-4682s',
+  vercelTeamId: 'team_lawrencew7729',
 };
+
+/** Register the golden release in the fake registry — REQUIRED before any run (registry verification). */
+async function registerGolden(providers: ReturnType<typeof createFakeProviders>) {
+  const r = await providers.controlPlane.insertRelease(GOLDEN);
+  expect(r.ok).toBe(true);
+}
 
 function input(overrides: Partial<Parameters<typeof runProvisioning>[1]> = {}) {
   return {
     companyName: 'ABC Trading Sdn Bhd',
     slug: 'abc',
     googleProjectId: 'abc-leadfinder-1234',
-    placesKeyFingerprint: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    placesKeyFingerprint: FP,
     goldenRelease: GOLDEN,
-    centralMonitoringSa: 'leadfinder-usage-monitor@leadfinder-shared-monitoring.iam.gserviceaccount.com',
     executionGate: true,
+    centralStore: true,
+    centralStoreUrl: CENTRAL_STORE,
+    billingAccountId: BILLING_ACCOUNT,
+    wif: WIF,
     ...overrides,
   };
+}
+
+function transient() {
+  return { placesApiKey: RAW_KEY, deviceLockSecrets: { appPass: APP_PASS } };
 }
 
 describe('R1 quota contract (dashboard side)', () => {
@@ -111,85 +131,242 @@ describe('R1 Golden Standard registry', () => {
   });
 });
 
-describe('R1 provisioning executor', () => {
-  it('executes all 11 stages to CUSTOMER_READY with the approved contract', async () => {
+describe('R1 provisioning executor (15-stage PRE-R1 model)', () => {
+  it('executes all 15 stages to CUSTOMER_READY with the approved contract', async () => {
     const providers = createFakeProviders();
-    const result = await runProvisioning(providers, input(), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
+    await registerGolden(providers);
+    const result = await runProvisioning(providers, input(), transient());
     expect(result.outcome).toBe('CUSTOMER_READY');
     expect(result.failedStageId).toBeNull();
-    expect(result.stages).toHaveLength(11);
+    expect(result.stages).toHaveLength(15);
     expect(result.stages.every((s) => s.status === 'PASS')).toBe(true);
     expect(result.rollbackMetadata.resourceIds.vercel).toBe('prj_fake_abc');
     expect(result.rollbackMetadata.resourceIds.domain).toBe('abc.leadfinder.business');
+    // ACL identity is deterministic per tenant
+    expect(result.rollbackMetadata.resourceIds.acl).toBe(aclUsernameFor(result.tenantId));
+  });
+
+  it('REFUSES an unknown/unregistered release (registry verification, no self-compare)', async () => {
+    const providers = createFakeProviders();
+    // no registerGolden — the registry is EMPTY
+    const result = await runProvisioning(providers, input(), transient());
+    expect(result.outcome).toBe('FAILED');
+    expect(result.stages[0].detail).toContain('unknown/unregistered release');
+  });
+
+  it('REFUSES a release whose registry record disagrees (mismatched artifact)', async () => {
+    const providers = createFakeProviders();
+    await providers.controlPlane.insertRelease({ ...GOLDEN, artifactSha256: 'd'.repeat(64) });
+    const result = await runProvisioning(providers, input(), transient());
+    expect(result.outcome).toBe('FAILED');
+    expect(result.stages[0].detail).toContain('artifact manifest mismatch');
   });
 
   it('fails closed when the R1 execution gate is not granted', async () => {
-    const result = await runProvisioning(createFakeProviders(), input({ executionGate: false }), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
+    const result = await runProvisioning(createFakeProviders(), input({ executionGate: false }), transient());
     expect(result.outcome).toBe('FAILED');
     expect(result.failedStageId).toBe('tenant');
     expect(result.stages[0].detail).toBe(EXECUTION_GATE_REQUIRED);
   });
 
   it('refuses raw Places key instead of fingerprint', async () => {
-    const result = await runProvisioning(createFakeProviders(), input({ placesKeyFingerprint: 'AIzaSyBR_pqYgLQ8qVvz1O3cB4Wx7yZ123456789abcdefg' }));
+    const providers = createFakeProviders();
+    await registerGolden(providers);
+    const result = await runProvisioning(providers, input({ placesKeyFingerprint: RAW_KEY }), transient());
     expect(result.outcome).toBe('FAILED');
     expect(result.failedStageId).toBe('tenant');
     expect(result.stages[0].detail).toContain('raw key refused');
   });
 
+  it('refuses missing WIF config at the tenant stage (fail-closed: WIF_AUDIENCE required)', async () => {
+    const providers = createFakeProviders();
+    await registerGolden(providers);
+    const result = await runProvisioning(providers, input({ wif: undefined }), transient());
+    expect(result.outcome).toBe('FAILED');
+    expect(result.failedStageId).toBe('tenant');
+    expect(result.stages[0].detail).toContain('WIF config required');
+  });
+
+  it('refuses an invalid billing account id at the tenant stage', async () => {
+    const providers = createFakeProviders();
+    await registerGolden(providers);
+    const result = await runProvisioning(providers, input({ billingAccountId: 'not-a-billing-id' }), transient());
+    expect(result.outcome).toBe('FAILED');
+    expect(result.failedStageId).toBe('tenant');
+    expect(result.stages[0].detail).toContain('billing account id required');
+  });
+
+  it('orders env/secrets BEFORE the golden deploy (stage order contract)', async () => {
+    const providers = createFakeProviders();
+    await registerGolden(providers);
+    const result = await runProvisioning(providers, input(), transient());
+    const ids = result.stages.map((s) => s.id);
+    // deploy must come AFTER wif/env/places_key/acl (all pre-deploy env+secrets)
+    expect(ids.indexOf('deploy')).toBeGreaterThan(ids.indexOf('wif'));
+    expect(ids.indexOf('deploy')).toBeGreaterThan(ids.indexOf('env'));
+    expect(ids.indexOf('deploy')).toBeGreaterThan(ids.indexOf('places_key'));
+    expect(ids.indexOf('deploy')).toBeGreaterThan(ids.indexOf('acl'));
+    // verification stages follow domain
+    expect(ids.indexOf('usage_smoke')).toBeGreaterThan(ids.indexOf('deploy'));
+    expect(ids.indexOf('device_lock')).toBeGreaterThan(ids.indexOf('usage_smoke'));
+    expect(ids.indexOf('billing')).toBeGreaterThan(ids.indexOf('device_lock'));
+    expect(ids.indexOf('finalize')).toBeGreaterThan(ids.indexOf('billing'));
+  });
+
   it('stops on failure and preserves earlier PASS stages', async () => {
     const providers = createFakeProviders({ failAt: ['vercel.deployGolden'] });
-    const result = await runProvisioning(providers, input(), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
+    await registerGolden(providers);
+    const result = await runProvisioning(providers, input(), transient());
     expect(result.outcome).toBe('FAILED');
     expect(result.failedStageId).toBe('deploy');
     expect(result.stages[0].status).toBe('PASS'); // tenant preserved
-    expect(result.stages[1].status).toBe('PASS'); // vercel project preserved
-    expect(result.stages[2].status).toBe('FAILED');
+    expect(result.stages[1].status).toBe('PASS'); // vercel preserved
+    expect(result.stages[5].status).toBe('PASS'); // acl preserved (before deploy)
+    expect(result.stages[6].status).toBe('FAILED'); // deploy
     // stages after failure remain PENDING (no forward execution)
-    expect(result.stages.slice(3).every((s) => s.status === 'PENDING')).toBe(true);
-    // device_lock stage sits between health and finalize
-    expect(result.stages[9].id).toBe('device_lock');
-    expect(result.stages[10].id).toBe('finalize');
+    expect(result.stages.slice(7).every((s) => s.status === 'PENDING')).toBe(true);
+    expect(result.stages[12].id).toBe('device_lock');
+    expect(result.stages[14].id).toBe('finalize');
   });
 
   it('retries only the failed stage and resumes (idempotent find-before-create)', async () => {
     const providers = createFakeProviders({ failAt: ['vercel.bindDomain'] });
-    const first = await runProvisioning(providers, input(), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
+    await registerGolden(providers);
+    const first = await runProvisioning(providers, input(), transient());
     expect(first.failedStageId).toBe('domain');
-    // retry with the failure removed — tenant/project/deploy already exist (idempotent)
     providers.setFailures([]);
-    const retried = await runProvisioning(providers, input(), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
+    const retried = await runProvisioning(providers, input(), transient());
     expect(retried.outcome).toBe('CUSTOMER_READY');
+    expect(retried.tenantId).toBe(first.tenantId);
   });
 
   it('never creates duplicate projects on retry', async () => {
     const providers = createFakeProviders({ failAt: ['vercel.bindDomain'] });
-    await runProvisioning(providers, input(), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
+    await registerGolden(providers);
+    await runProvisioning(providers, input(), transient());
     providers.setFailures([]);
-    await runProvisioning(providers, input(), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
+    await runProvisioning(providers, input(), transient());
     providers.setFailures([]);
-    await runProvisioning(providers, input(), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
-    // fake keeps a single project per tenant — no duplicate creation path
-    const result = await runProvisioning(providers, input(), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
+    await runProvisioning(providers, input(), transient());
+    const result = await runProvisioning(providers, input(), transient());
     expect(result.outcome).toBe('CUSTOMER_READY');
   });
 
   it('rejects a domain already bound to another project (isolation)', async () => {
     const providers = createFakeProviders();
-    await runProvisioning(providers, input(), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
-    const second = await runProvisioning(providers, input({ slug: 'abc' }), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
+    await registerGolden(providers);
+    await runProvisioning(providers, input(), transient());
+    const second = await runProvisioning(providers, input({ slug: 'abc' }), transient());
     // same slug → same hostname; fake returns the existing project (idempotent) — still ONE owner
     expect(second.outcome).toBe('CUSTOMER_READY');
     expect(second.rollbackMetadata.resourceIds.domain).toBe('abc.leadfinder.business');
   });
 
-  it('verifies runtime/persisted quota agreement at stage 8 (fail-closed)', async () => {
+  it('verifies runtime/persisted quota agreement at stage 11 (fail-closed)', async () => {
     const providers = createFakeProviders({ failAt: ['cp.insertCustomerConfig'] });
-    // quota stage runs BEFORE finalize; insertCustomerConfig failure only surfaces at finalize
-    const result = await runProvisioning(providers, input(), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
+    await registerGolden(providers);
+    const result = await runProvisioning(providers, input(), transient());
     expect(result.outcome).toBe('FAILED');
     expect(result.failedStageId).toBe('finalize');
     // quota stage itself passed (runtime == persisted contract)
-    expect(result.stages[7].status).toBe('PASS');
+    expect(result.stages[10].status).toBe('PASS');
+    expect(result.stages[10].id).toBe('quota');
+  });
+
+  it('WIF onboarding stages run and record the exact customer SA identity', async () => {
+    const providers = createFakeProviders();
+    await registerGolden(providers);
+    const result = await runProvisioning(providers, input(), transient());
+    expect(result.outcome).toBe('CUSTOMER_READY');
+    const wifStage = result.stages.find((s) => s.id === 'wif');
+    expect(wifStage?.status).toBe('PASS');
+    // A3b: the wif stage evidence is the customer's OWN monitoring SA email
+    expect(wifStage?.resourceId).toBe(customerMonitoringSaEmail('abc-leadfinder-1234', result.tenantId));
+  });
+
+  it('APP_PASS owner-action HOLD: missing APP_PASS stops at the acl stage before any ACL identity exists', async () => {
+    const providers = createFakeProviders();
+    await registerGolden(providers);
+    const result = await runProvisioning(providers, input(), { placesApiKey: RAW_KEY });
+    expect(result.outcome).toBe('FAILED');
+    expect(result.failedStageId).toBe('acl');
+    expect(result.stages.find((s) => s.id === 'acl')?.detail).toContain('OWNER ACTION REQUIRED');
+  });
+
+  it('APP_PASS HOLD → resume: same tenantId, CUSTOMER_READY after the owner supplies the secret', async () => {
+    const providers = createFakeProviders();
+    await registerGolden(providers);
+    const hold = await runProvisioning(providers, input(), { placesApiKey: RAW_KEY });
+    expect(hold.failedStageId).toBe('acl');
+    const resumed = await runProvisioning(providers, input(), transient());
+    expect(resumed.outcome).toBe('CUSTOMER_READY');
+    expect(resumed.tenantId).toBe(hold.tenantId);
+  });
+
+  it('acl stage hands the per-tenant REST token (NEVER the admin password) into the store env', async () => {
+    const providers = createFakeProviders();
+    await registerGolden(providers);
+    const result = await runProvisioning(providers, input(), transient());
+    expect(result.outcome).toBe('CUSTOMER_READY');
+    const handed = lastHandedOffDeviceLockSecrets();
+    expect(handed).not.toBeNull();
+    // the fake admin mints rest_tok_<username> — the env must receive exactly that token
+    expect(handed?.kvRestApiToken).toBe(`rest_tok_${aclUsernameFor(result.tenantId)}`);
+    expect(handed?.kvRestApiUrl).toBe(CENTRAL_STORE);
+  });
+
+  it('usage smoke failure fails closed at usage_smoke (functional activation proof required)', async () => {
+    const providers = createFakeProviders({ failAt: ['usageSmoke.run'] });
+    await registerGolden(providers);
+    const result = await runProvisioning(providers, input(), transient());
+    expect(result.outcome).toBe('FAILED');
+    expect(result.failedStageId).toBe('usage_smoke');
+  });
+
+  it('pre-existing activation-month usage stops at billing (owner review)', async () => {
+    const providers = createFakeProviders();
+    await registerGolden(providers);
+    providers.setPreActivationUsage('abc-leadfinder-1234', 7);
+    const result = await runProvisioning(providers, input(), transient());
+    expect(result.outcome).toBe('FAILED');
+    expect(result.failedStageId).toBe('billing');
+    expect(result.stages.find((s) => s.id === 'billing')?.detail).toContain('OWNER REVIEW REQUIRED');
+  });
+
+  it('billing account with more than one linked project stops at billing (isolation contract)', async () => {
+    const providers = createFakeProviders();
+    await registerGolden(providers);
+    providers.setBillingProjects(BILLING_ACCOUNT, ['abc-leadfinder-1234', 'other-project-5678']);
+    const result = await runProvisioning(providers, input(), transient());
+    expect(result.outcome).toBe('FAILED');
+    expect(result.failedStageId).toBe('billing');
+    expect(result.stages.find((s) => s.id === 'billing')?.detail).toContain('exactly 1');
+  });
+
+  it('billing evidence + ACL identity are persisted at finalize (non-secret only)', async () => {
+    const providers = createFakeProviders();
+    await registerGolden(providers);
+    const result = await runProvisioning(providers, input(), transient());
+    expect(result.outcome).toBe('CUSTOMER_READY');
+    const readback = await providers.controlPlane.findConfigByTenant(result.tenantId);
+    expect(readback.config?.billingAccountId).toBe(BILLING_ACCOUNT);
+    expect(readback.config?.billingPreActivationUsage).toBe(0);
+    expect(readback.config?.billingActivationMonth).toMatch(/^\d{4}-(0[1-9]|1[0-2])$/);
+    expect(readback.config?.aclUsername).toBe(aclUsernameFor(result.tenantId));
+    expect(readback.config?.aclTokenFingerprint).toMatch(/^[A-F0-9]{64}$/);
+    expect(JSON.stringify(readback.config)).not.toContain('AIza');
+    expect(JSON.stringify(readback.config)).not.toContain('rest_tok_');
+  });
+
+  it('WIF_AUDIENCE env value is the fixed provider full name (identical for every customer)', async () => {
+    expect(wifAudienceFor(WIF)).toBe('//iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/lf-vercel-wif/providers/vercel-oidc');
+    const providers = createFakeProviders();
+    await registerGolden(providers);
+    const result = await runProvisioning(providers, input(), transient());
+    expect(result.outcome).toBe('CUSTOMER_READY');
+    const second = await runProvisioning(providers, input({ slug: 'xyz' }), transient());
+    expect(second.outcome).toBe('CUSTOMER_READY');
+    // audience is org-level — no per-customer variance
+    expect(wifAudienceFor(input().wif!)).toBe(wifAudienceFor(input({ slug: 'xyz' }).wif!));
   });
 });

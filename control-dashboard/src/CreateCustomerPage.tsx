@@ -495,7 +495,7 @@ export function CreateCustomerPage({
             <AlertTriangle size={18} />
             <div>
               <strong>CUSTOMER_PROVISIONING_NOT_AUTHORIZED</strong>
-              <span>R1 is not approved. This action is disconnected from tenant creation, Vercel, Google, API keys, domains and monitoring grants.</span>
+              <span>R1 is not approved. This action is disconnected from tenant creation, Vercel, Google, API keys, domains and monitoring grants. Real provisioning runs ONLY through the operator CLI (scripts/provision-cli.ts).</span>
             </div>
           </div>
         </section>

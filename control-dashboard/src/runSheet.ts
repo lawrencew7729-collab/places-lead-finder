@@ -1,22 +1,28 @@
 /**
  * PRE-R1 Provisioning Run Sheet — UI state model only.
  *
- * Deterministic mock states. NEVER connected to real provisioning:
- * real R1 provisioning remains separately owner-gated.
+ * Mirrors the executor's 15-stage model (PRE-R1 PROVISIONING AUTOMATION
+ * REMEDIATION). Deterministic mock states. NEVER connected to real
+ * provisioning: real R1 provisioning runs ONLY through the operator CLI
+ * (scripts/provision-cli.ts) — the CREATE CUSTOMER button stays disconnected.
  */
 export type RunSheetStatus = 'PENDING' | 'RUNNING' | 'PASS' | 'FAILED' | 'SKIPPED';
 
 export type RunSheetStageId =
   | 'tenant'
   | 'vercel'
+  | 'wif'
+  | 'env'
+  | 'places_key'
+  | 'acl'
   | 'deploy'
   | 'domain'
-  | 'places_key'
   | 'restriction'
-  | 'monitoring'
+  | 'iam'
   | 'quota'
-  | 'health'
+  | 'usage_smoke'
   | 'device_lock'
+  | 'billing'
   | 'finalize';
 
 export interface RunSheetStage {
@@ -29,14 +35,18 @@ export interface RunSheetStage {
 export const RUN_SHEET_STAGES: readonly { id: RunSheetStageId; label: string }[] = Object.freeze([
   { id: 'tenant', label: 'Create tenant identity' },
   { id: 'vercel', label: 'Create isolated Vercel project' },
+  { id: 'wif', label: 'Enable OIDC + provision customer monitoring SA' },
+  { id: 'env', label: 'Write runtime env (before build)' },
+  { id: 'places_key', label: 'Inject customer Places API key' },
+  { id: 'acl', label: 'Provision tenant ACL credential' },
   { id: 'deploy', label: 'Deploy approved Lead Finder release' },
   { id: 'domain', label: 'Bind exact customer subdomain' },
-  { id: 'places_key', label: 'Configure customer Places API key' },
   { id: 'restriction', label: 'Verify exact Website Restriction' },
-  { id: 'monitoring', label: 'Connect Shared Monitoring' },
+  { id: 'iam', label: 'Grant Shared Monitoring access' },
   { id: 'quota', label: 'Verify monthly quota policy' },
-  { id: 'health', label: 'Run health / smoke checks' },
+  { id: 'usage_smoke', label: 'Run functional activation smoke' },
   { id: 'device_lock', label: 'Verify device access policy' },
+  { id: 'billing', label: 'Verify billing-account isolation' },
   { id: 'finalize', label: 'Finalize Control Plane customer record' },
 ]);
 
@@ -67,14 +77,18 @@ export function runSheetState(stages: RunSheetStage[]): RunSheetState {
 export const RUN_SHEET_SUCCESS_DETAILS: Record<RunSheetStageId, string> = Object.freeze({
   tenant: 'Tenant identity created',
   vercel: 'Vercel project created',
+  wif: 'Vercel OIDC + WIF authorization verified',
+  env: 'Runtime env written + readback verified',
+  places_key: 'Places key injected (transient)',
+  acl: 'Tenant ACL credential provisioned',
   deploy: 'Deployment READY',
   domain: 'Domain connected',
-  places_key: 'Places key configured',
   restriction: 'Website restriction verified',
-  monitoring: 'Shared Monitoring connected',
+  iam: 'Shared Monitoring grants verified',
   quota: 'Quota policy 1000 / 850 / 900 (SAFETY STOP) verified',
-  health: 'Health checks passed',
+  usage_smoke: 'Functional activation smoke passed',
   device_lock: 'DEVICE ACCESS POLICY VERIFIED — 2 DEVICE LIMIT ACTIVE',
+  billing: 'Billing-account isolation verified (1 project, zero prior usage)',
   finalize: 'Customer record finalized',
 });
 

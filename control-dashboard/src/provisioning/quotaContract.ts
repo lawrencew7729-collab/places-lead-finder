@@ -80,9 +80,13 @@ export function quotaSignal(used: number): Signal {
 /**
  * Runtime ENV pairs — ONE contract propagated to BOTH runtimes:
  *  - browser Vite runtime reads VITE_CUSTOMER_* (build-time)
- *  - serverless api/usage reads CUSTOMER_MONTHLY_TARGET
+ *  - serverless api/usage reads CUSTOMER_MONTHLY_TARGET, CUSTOMER_GOOGLE_PROJECT_ID,
+ *    WIF_AUDIENCE (REQUIRED — 503 not_configured without it) and
+ *    CUSTOMER_MONITORING_SA (optional; central SA default)
  * The same constants feed both; provisioning writes both sets and verifies
- * they agree (mismatch fails closed).
+ * they agree (mismatch fails closed). WIF_AUDIENCE value itself is the
+ * provider full name (non-secret) derived at provisioning time from the
+ * WifConfig — its PRESENCE is contracted here.
  */
 export function runtimeEnvPairs() {
   return {
@@ -94,9 +98,18 @@ export function runtimeEnvPairs() {
     },
     server: {
       CUSTOMER_MONTHLY_TARGET: String(QUOTA_CONTRACT.monthlyTarget),
+      CUSTOMER_GOOGLE_PROJECT_ID: '__REQUIRED__',
+      WIF_AUDIENCE: '__REQUIRED__',
+      CUSTOMER_MONITORING_SA: '__REQUIRED__',
     },
   };
 }
+
+/** Every key the deployed customer runtime needs BEFORE the golden build/deploy. */
+export const REQUIRED_RUNTIME_ENV_KEYS: readonly string[] = Object.freeze([
+  ...Object.keys(runtimeEnvPairs().browser),
+  ...Object.keys(runtimeEnvPairs().server),
+]);
 
 /** Fail-closed: browser and server env values must agree with each other AND the contract. */
 export function verifyRuntimeEnvConsistency(browserEnv: Record<string, string>, serverEnv: Record<string, string>): { consistent: boolean; reasons: string[] } {
@@ -110,6 +123,11 @@ export function verifyRuntimeEnvConsistency(browserEnv: Record<string, string>, 
   check(pairs.browser.VITE_CUSTOMER_RED_PERCENT, browserEnv.VITE_CUSTOMER_RED_PERCENT, 'browser red');
   check(pairs.browser.VITE_CUSTOMER_ENFORCEMENT_MODE, browserEnv.VITE_CUSTOMER_ENFORCEMENT_MODE, 'browser enforcement');
   check(pairs.server.CUSTOMER_MONTHLY_TARGET, serverEnv.CUSTOMER_MONTHLY_TARGET, 'server monthly');
+  // WIF_AUDIENCE is REQUIRED at runtime (api/usage.js 503 not_configured without it).
+  // Its VALUE is the provider full name derived at provisioning time; presence is the contract.
+  if (!serverEnv.WIF_AUDIENCE) reasons.push('server WIF_AUDIENCE missing (required by api/usage.js)');
+  if (!serverEnv.CUSTOMER_GOOGLE_PROJECT_ID) reasons.push('server CUSTOMER_GOOGLE_PROJECT_ID missing (required by api/usage.js)');
+  if (!serverEnv.CUSTOMER_MONITORING_SA) reasons.push('server CUSTOMER_MONITORING_SA missing');
   if (browserEnv.VITE_CUSTOMER_MONTHLY_TARGET !== serverEnv.CUSTOMER_MONTHLY_TARGET) {
     reasons.push('browser/server monthly cap disagreement');
   }

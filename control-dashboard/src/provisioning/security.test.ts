@@ -12,32 +12,43 @@ const GOLDEN: GoldenReleaseIdentity = {
   status: 'approved',
 };
 
-// R1 TWO-DEVICE CONTRACT — per-customer handoff secrets (transient, first run)
-const DEVICE_LOCK_SECRETS = {
-  kvRestApiUrl: 'https://store-a.upstash.io',
-  kvRestApiToken: 'tok_abcdefghijkl',
-  appPass: 'accesscode123456',
-};
+const FP = 'A'.repeat(64);
+const APP_PASS = 'accesscode123456';
+const RAW_KEY = 'AIzaSyA_TEST_KEY_0000000000000000000000';
 
-const RAW_KEY = 'AIzaSyBR_pqYgLQ8qVvz1O3cB4Wx7yZ123456789abcdefg';
+const WIF = {
+  pool: 'lf-vercel-wif',
+  provider: 'vercel-oidc',
+  centralProjectNumber: '123456789012',
+  vercelTeamSlug: 'lawrencew7729-4682s',
+  vercelTeamId: 'team_lawrencew7729',
+};
 
 function input(overrides: Record<string, unknown> = {}) {
   return {
     companyName: 'ABC Trading Sdn Bhd',
     slug: 'abc',
     googleProjectId: 'abc-leadfinder-1234',
-    placesKeyFingerprint: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+    placesKeyFingerprint: FP,
     goldenRelease: GOLDEN,
-    centralMonitoringSa: 'leadfinder-usage-monitor@leadfinder-shared-monitoring.iam.gserviceaccount.com',
     executionGate: true,
+    centralStore: true,
+    centralStoreUrl: 'https://central.example.com',
+    billingAccountId: '01B61E-759031-B494E4',
+    wif: WIF,
     ...overrides,
   };
+}
+
+function transient() {
+  return { placesApiKey: RAW_KEY, deviceLockSecrets: { appPass: APP_PASS } };
 }
 
 describe('R1 security — raw Places key never enters persistence', () => {
   it('executor refuses a raw AIza… key at the tenant stage', async () => {
     const providers = createFakeProviders();
-    const result = await runProvisioning(providers, input({ placesKeyFingerprint: RAW_KEY }), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
+    await providers.controlPlane.insertRelease(GOLDEN);
+    const result = await runProvisioning(providers, input({ placesKeyFingerprint: RAW_KEY }), transient());
     expect(result.outcome).toBe('FAILED');
     expect(result.failedStageId).toBe('tenant');
     expect(result.stages[0].detail).toContain('raw key refused');
@@ -45,26 +56,41 @@ describe('R1 security — raw Places key never enters persistence', () => {
 
   it('raw key never appears in any stage detail or audit detail', async () => {
     const providers = createFakeProviders();
-    const result = await runProvisioning(providers, input(), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
+    await providers.controlPlane.insertRelease(GOLDEN);
+    const result = await runProvisioning(providers, input(), transient());
     expect(result.outcome).toBe('CUSTOMER_READY');
     const allText = JSON.stringify({ stages: result.stages, rollback: result.rollbackMetadata });
     expect(allText).not.toContain('AIza');
   });
 
-  it('persisted config path only ever carries the 8-hex fingerprint', async () => {
+  it('persisted config path only ever carries the FULL 64-hex fingerprint', async () => {
     const providers = createFakeProviders();
-    const result = await runProvisioning(providers, input(), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
+    await providers.controlPlane.insertRelease(GOLDEN);
+    const result = await runProvisioning(providers, input(), transient());
     const readback = await providers.controlPlane.findConfigByTenant(result.tenantId);
     expect(readback.ok).toBe(true);
-    expect(readback.config?.keyFingerprint).toBe('AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA');
+    expect(readback.config?.keyFingerprint).toBe(FP);
     expect(readback.config?.keyFingerprint.length).toBe(64);
     expect(JSON.stringify(readback.config)).not.toContain('AIza');
   });
 
-  it('provisioning rejects raw-key-shaped inputs even with a valid fingerprint prefix', async () => {
-    // fingerprint must be EXACTLY 8 hex chars — longer/raw values are refused
+  it('provisioning rejects raw-key-shaped inputs even with a fingerprint prefix', async () => {
+    // fingerprint must be EXACTLY 64 hex chars — raw/truncated values are refused
     const providers = createFakeProviders();
-    const result = await runProvisioning(providers, input({ placesKeyFingerprint: RAW_KEY.slice(0, 10) }), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
+    await providers.controlPlane.insertRelease(GOLDEN);
+    const result = await runProvisioning(providers, input({ placesKeyFingerprint: RAW_KEY.slice(0, 10) }), transient());
     expect(result.outcome).toBe('FAILED');
+    expect(result.failedStageId).toBe('tenant');
+  });
+
+  it('transient raw key is consumed at the places_key stage and never serialized', async () => {
+    const providers = createFakeProviders();
+    await providers.controlPlane.insertRelease(GOLDEN);
+    const result = await runProvisioning(providers, input(), transient());
+    expect(result.outcome).toBe('CUSTOMER_READY');
+    const serialized = JSON.stringify({ stages: result.stages, rollback: result.rollbackMetadata });
+    expect(serialized).not.toContain('AIza');
+    expect(serialized).not.toContain(APP_PASS);
+    expect(serialized).not.toContain('rest_tok_');
   });
 });

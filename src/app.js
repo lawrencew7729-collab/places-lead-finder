@@ -3,7 +3,12 @@ import { applyControlsToElements, controlsFor } from './searchControls.js';
 import { customerQuota } from './config.js';
 import { createUsageTelemetry } from './usageTelemetry.js';
 const API_URL = 'https://places.googleapis.com/v1/places:searchText';
-const EMBEDDED_KEY = '«redacted:AIza…»';
+// PRE-R1 KEY BAKE SEAM: the customer Places key is injected at BUILD TIME via
+// VITE_PLACES_API_KEY (provisioning stage 5, encrypted Vercel env, transient
+// raw key). The hardcoded placeholder below is the NO-KEY fallback — a build
+// without the env never ships a working key. The key is browser-visible by
+// design (referrer-restricted; residual documented in the activation contract).
+const EMBEDDED_KEY = import.meta.env?.VITE_PLACES_API_KEY || '«redacted:AIza…»';
 const EXPECTED_ORIGINS = ['https://places-lead-finder-site.vercel.app', 'https://leadfinder.business'];
 const FIELDS = 'places.id,places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.internationalPhoneNumber,places.websiteUri,places.businessStatus,places.location,nextPageToken';
 

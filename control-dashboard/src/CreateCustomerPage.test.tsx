@@ -130,8 +130,8 @@ describe('PRE-R1 Create Customer page', () => {
     const user = userEvent.setup();
     renderPage();
     const list = screen.getByTestId('run-sheet-list');
-    expect(list.children).toHaveLength(11);
-    expect(screen.getAllByText('PENDING').length).toBe(11);
+    expect(list.children).toHaveLength(15);
+    expect(screen.getAllByText('PENDING').length).toBe(15);
     await user.click(screen.getByRole('button', { name: /preview run sheet/i }));
     // first stage flips to RUNNING synchronously
     expect(await screen.findByText('Running…')).toBeVisible();

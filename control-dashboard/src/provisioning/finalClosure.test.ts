@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeEach } from 'vitest';
 import { runProvisioning } from './executor';
 import { createFakeProviders, lastHandedOffPlacesKey } from './provisioningProviders';
-import { createVercelAdapter, createControlPlaneAdapter, createGoogleAdapter, createHealthAdapter, createDeviceLockAdapter, createFakeTransport } from './adapters';
+import { createVercelAdapter, createControlPlaneAdapter, createGoogleAdapter, createHealthAdapter, createDeviceLockAdapter, createPlacesKeyAdapter, createUpstashRedisAclAdmin, createUsageSmokeAdapter, createFakeTransport } from './adapters';
 import { runtimeEnvPairs, verifyRuntimeEnvConsistency } from './quotaContract';
 import type { GoldenReleaseIdentity } from './releaseRegistry';
 
@@ -31,15 +31,26 @@ function input() {
     googleProjectId: 'abc-leadfinder-1234',
     placesKeyFingerprint: FP,
     goldenRelease: GOLDEN,
-    centralMonitoringSa: 'leadfinder-usage-monitor@leadfinder-shared-monitoring.iam.gserviceaccount.com',
     executionGate: true,
+    centralStore: true,
+    centralStoreUrl: 'https://central.example.com',
+    billingAccountId: '01B61E-759031-B494E4',
+    wif: {
+      pool: 'lf-vercel-wif',
+      provider: 'vercel-oidc',
+      centralProjectNumber: '123456789012',
+      vercelTeamSlug: 'lawrencew7729-4682s',
+      vercelTeamId: 'team_lawrencew7729',
+    },
   };
 }
 
 describe('R1 final closure — full fingerprint contract', () => {
   it('persists exactly 64 uppercase hex characters', async () => {
     const providers = createFakeProviders();
-    const result = await runProvisioning(providers, input(), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
+    await providers.controlPlane.insertRelease(GOLDEN);
+    const result = await runProvisioning(providers, input(), { placesApiKey: RAW_KEY, deviceLockSecrets: DEVICE_LOCK_SECRETS });
+    expect(result.outcome).toBe('CUSTOMER_READY');
     const readback = await providers.controlPlane.findConfigByTenant(result.tenantId);
     expect(readback.config?.keyFingerprint).toMatch(/^[A-F0-9]{64}$/);
     expect(readback.config?.keyFingerprint.length).toBe(64);
@@ -47,7 +58,8 @@ describe('R1 final closure — full fingerprint contract', () => {
 
   it('refuses truncated 8-hex fingerprints (must be full 64)', async () => {
     const providers = createFakeProviders();
-    const result = await runProvisioning(providers, input().placesKeyFingerprint ? { ...input(), placesKeyFingerprint: '1A2B3C4D' } : input(), { deviceLockSecrets: DEVICE_LOCK_SECRETS });
+    await providers.controlPlane.insertRelease(GOLDEN);
+    const result = await runProvisioning(providers, input().placesKeyFingerprint ? { ...input(), placesKeyFingerprint: '1A2B3C4D' } : input(), { placesApiKey: RAW_KEY, deviceLockSecrets: DEVICE_LOCK_SECRETS });
     expect(result.outcome).toBe('FAILED');
     expect(result.failedStageId).toBe('tenant');
   });
@@ -60,6 +72,7 @@ describe('R1 final closure — transient raw key handoff', () => {
 
   it('stage 5 consumes the raw key via the ephemeral handoff and discards it', async () => {
     const providers = createFakeProviders();
+    await providers.controlPlane.insertRelease(GOLDEN);
     const result = await runProvisioning(providers, input(), { placesApiKey: RAW_KEY, deviceLockSecrets: DEVICE_LOCK_SECRETS });
     expect(result.outcome).toBe('CUSTOMER_READY');
     expect(lastHandedOffPlacesKey()).toBe(RAW_KEY);
@@ -70,6 +83,7 @@ describe('R1 final closure — transient raw key handoff', () => {
 
   it('raw key never enters DB/audit/rollback even when handed off', async () => {
     const providers = createFakeProviders();
+    await providers.controlPlane.insertRelease(GOLDEN);
     const result = await runProvisioning(providers, input(), { placesApiKey: RAW_KEY, deviceLockSecrets: DEVICE_LOCK_SECRETS });
     const readback = await providers.controlPlane.findConfigByTenant(result.tenantId);
     expect(JSON.stringify(readback.config)).not.toContain('AIza');
@@ -78,6 +92,7 @@ describe('R1 final closure — transient raw key handoff', () => {
 
   it('invalid raw key fails at the handoff (stage 5)', async () => {
     const providers = createFakeProviders();
+    await providers.controlPlane.insertRelease(GOLDEN);
     const result = await runProvisioning(providers, input(), { placesApiKey: 'not-a-real-key' });
     expect(result.outcome).toBe('FAILED');
     expect(result.failedStageId).toBe('places_key');
@@ -93,17 +108,25 @@ describe('R1 final closure — quota ENV consistency', () => {
       VITE_CUSTOMER_RED_PERCENT: '90',
       VITE_CUSTOMER_ENFORCEMENT_MODE: 'disable_new_search',
     });
-    expect(pairs.server).toEqual({ CUSTOMER_MONTHLY_TARGET: '1000' });
+    // server block additionally REQUIRES WIF_AUDIENCE + monitoring SA + project (fail-closed presence)
+    expect(pairs.server).toEqual({
+      CUSTOMER_MONTHLY_TARGET: '1000',
+      CUSTOMER_GOOGLE_PROJECT_ID: '__REQUIRED__',
+      WIF_AUDIENCE: '__REQUIRED__',
+      CUSTOMER_MONITORING_SA: '__REQUIRED__',
+    });
   });
 
   it('verifyRuntimeEnvConsistency accepts matching pairs', () => {
     const pairs = runtimeEnvPairs();
-    expect(verifyRuntimeEnvConsistency(pairs.browser, pairs.server).consistent).toBe(true);
+    const server = { ...pairs.server, CUSTOMER_GOOGLE_PROJECT_ID: 'p1', WIF_AUDIENCE: '//iam…/providers/x', CUSTOMER_MONITORING_SA: 'sa@p1.iam.gserviceaccount.com' };
+    expect(verifyRuntimeEnvConsistency(pairs.browser, server).consistent).toBe(true);
   });
 
   it('browser/server disagreement fails closed', () => {
     const pairs = runtimeEnvPairs();
-    const bad = verifyRuntimeEnvConsistency({ ...pairs.browser, VITE_CUSTOMER_MONTHLY_TARGET: '5000' }, pairs.server);
+    const server = { ...pairs.server, CUSTOMER_GOOGLE_PROJECT_ID: 'p1', WIF_AUDIENCE: '//iam…/providers/x', CUSTOMER_MONITORING_SA: 'sa@p1.iam.gserviceaccount.com' };
+    const bad = verifyRuntimeEnvConsistency({ ...pairs.browser, VITE_CUSTOMER_MONTHLY_TARGET: '5000' }, server);
     expect(bad.consistent).toBe(false);
     expect(bad.reasons.join()).toContain('browser/server monthly cap disagreement');
   });
@@ -112,6 +135,15 @@ describe('R1 final closure — quota ENV consistency', () => {
     const pairs = runtimeEnvPairs();
     const bad = verifyRuntimeEnvConsistency(pairs.browser, { CUSTOMER_MONTHLY_TARGET: '5000' });
     expect(bad.consistent).toBe(false);
+  });
+
+  it('missing WIF_AUDIENCE / CUSTOMER_MONITORING_SA / project fails closed (api/usage 503 not_configured contract)', () => {
+    const pairs = runtimeEnvPairs();
+    const missingWif = verifyRuntimeEnvConsistency(pairs.browser, { CUSTOMER_MONTHLY_TARGET: '1000' });
+    expect(missingWif.consistent).toBe(false);
+    expect(missingWif.reasons.join()).toContain('WIF_AUDIENCE missing');
+    expect(missingWif.reasons.join()).toContain('CUSTOMER_GOOGLE_PROJECT_ID missing');
+    expect(missingWif.reasons.join()).toContain('CUSTOMER_MONITORING_SA missing');
   });
 });
 
@@ -131,17 +163,20 @@ describe('R1 final closure — real server-side adapters', () => {
     const { transport, calls } = createFakeTransport([
       { urlPrefix: '/v9/projects?', body: { projects: [] } },
       { urlPrefix: '/v9/projects?', body: { id: 'prj_new' }, status: 200 },
-      { urlPrefix: '/env', body: {} },
+      { urlPrefix: '/env', body: [] }, // env readback (GET) — empty project env
     ]);
     const adapter = createVercelAdapter({ token: 't', teamId: 'team_x', transport });
     const created = await adapter.createProject('tenant-1', 'abc');
     expect(created.ok && created.resourceId).toBe('prj_new');
-    const env = await adapter.setRuntimeEnv('prj_new', { monthlyTarget: 1000, amberPercent: 85, redPercent: 90, enforcementMode: 'disable_new_search', googleProjectId: 'p1' });
+    const env = await adapter.setRuntimeEnv('prj_new', { monthlyTarget: 1000, amberPercent: 85, redPercent: 90, enforcementMode: 'disable_new_search', googleProjectId: 'p1', wifAudience: '//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/p/providers/pr', centralMonitoringSa: 'sa@x.iam.gserviceaccount.com' });
     expect(env.ok).toBe(true);
     const envCalls = calls.filter((c) => c.url.includes('/env'));
-    expect(envCalls.length).toBe(6); // 4 browser + server monthly + google project
-    expect(envCalls.map((c) => JSON.parse(c.body ?? '{}').key)).toContain('VITE_CUSTOMER_MONTHLY_TARGET');
-    expect(envCalls.map((c) => JSON.parse(c.body ?? '{}').key)).toContain('CUSTOMER_MONTHLY_TARGET');
+    expect(envCalls.length).toBe(9); // 1 GET readback + 8 POSTs (4 VITE + server monthly + project + WIF_AUDIENCE + monitoring SA)
+    const postedKeys = envCalls.filter((c) => c.method === 'POST').map((c) => JSON.parse(c.body ?? '{}').key);
+    expect(postedKeys).toContain('VITE_CUSTOMER_MONTHLY_TARGET');
+    expect(postedKeys).toContain('CUSTOMER_MONTHLY_TARGET');
+    expect(postedKeys).toContain('WIF_AUDIENCE');
+    expect(postedKeys).toContain('CUSTOMER_MONITORING_SA');
     expect(envCalls.every((c) => JSON.parse(c.body ?? '{}').value !== '5000')).toBe(true);
   });
 
@@ -246,9 +281,9 @@ describe('R1 final closure — real server-side adapters', () => {
     }, 't1');
     expect(res.ok).toBe(true);
     const envPosts = calls.filter((c) => c.url.includes('/env') && c.method === 'POST');
-    expect(envPosts.length).toBe(4);
+    expect(envPosts.length).toBe(5);
     const keys = envPosts.map((c) => JSON.parse(c.body ?? '{}').key);
-    expect(keys.sort()).toEqual(['APP_PASS', 'CUSTOMER_TENANT_ID', 'KV_REST_API_TOKEN', 'KV_REST_API_URL']);
+    expect(keys.sort()).toEqual(['APP_PASS', 'CUSTOMER_TENANT_ID', 'KV_REST_API_TOKEN', 'KV_REST_API_TOKEN_FINGERPRINT', 'KV_REST_API_URL']);
   });
 
   it('device-lock adapter FAILS on store drift when the deployment store differs from the handoff', async () => {
@@ -266,7 +301,7 @@ describe('R1 final closure — real server-side adapters', () => {
     }, 't1');
     expect(res.ok).toBe(false);
     if (res.ok) throw new Error('expected configureDeviceLock to fail');
-    expect(res.reason).toContain('drift');
+    expect((res as { reason: string }).reason).toContain('drift');
     expect(calls.filter((c) => c.method === 'POST').length).toBe(0); // nothing written
   });
 
@@ -289,12 +324,15 @@ describe('R1 final closure — real server-side adapters', () => {
     }, '563bfb5f-5ec1-44a8-95b2-2e2ee3e9332b');
     expect(res.ok).toBe(true);
     const envPosts = calls.filter((c) => c.url.includes('/env') && c.method === 'POST');
-    // central mode writes ALL FOUR envs — the shared UPSTASH token is NOT reused
-    expect(envPosts.length).toBe(4);
+    // central mode writes ALL FIVE envs incl. the token fingerprint — the shared UPSTASH token is NOT reused
+    expect(envPosts.length).toBe(5);
     const keys = envPosts.map((c) => JSON.parse(c.body ?? '{}').key).sort();
-    expect(keys).toEqual(['APP_PASS', 'CUSTOMER_TENANT_ID', 'KV_REST_API_TOKEN', 'KV_REST_API_URL']);
+    expect(keys).toEqual(['APP_PASS', 'CUSTOMER_TENANT_ID', 'KV_REST_API_TOKEN', 'KV_REST_API_TOKEN_FINGERPRINT', 'KV_REST_API_URL']);
     const tokenPost = envPosts.find((c) => JSON.parse(c.body ?? '{}').key === 'KV_REST_API_TOKEN');
     expect(JSON.parse(tokenPost?.body ?? '{}').value).toBe('tok_customer_acl_only');
+    const fpPost = envPosts.find((c) => JSON.parse(c.body ?? '{}').key === 'KV_REST_API_TOKEN_FINGERPRINT');
+    // full 64-hex uppercase SHA-256 of the REST token — never the raw token
+    expect(JSON.parse(fpPost?.body ?? '{}').value).toMatch(/^[A-F0-9]{64}$/);
     expect(envPosts.every((c) => !(c.body ?? '').includes('tok_shared'))).toBe(true); // shared token never written
   });
 
@@ -313,7 +351,7 @@ describe('R1 final closure — real server-side adapters', () => {
     }, 't1');
     expect(res.ok).toBe(false);
     if (res.ok) throw new Error('expected central drift failure');
-    expect(res.reason).toContain('drift');
+    expect((res as { reason: string }).reason).toContain('drift');
     expect(calls.filter((c) => c.method === 'POST').length).toBe(0);
   });
 
@@ -349,6 +387,136 @@ describe('R1 final closure — real server-side adapters', () => {
     const adapter = createHealthAdapter({ transport });
     const res = await adapter.smokeCheck('abc.leadfinder.business');
     expect(res.ok).toBe(true);
+  });
+
+  it('Vercel adapter enables team-mode OIDC idempotently (PATCH + readback skip)', async () => {
+    const { transport, calls } = createFakeTransport([
+      { urlPrefix: '/v9/projects/prj_t1?', body: { oidcTokenConfig: { enabled: false } } },
+      { urlPrefix: '/v9/projects/prj_t1?', body: { oidcTokenConfig: { enabled: true, issuerMode: 'team' } } },
+    ]);
+    const adapter = createVercelAdapter({ token: 't', teamId: 'team_x', transport });
+    const res = await adapter.enableVercelOidc('prj_t1');
+    expect(res.ok).toBe(true);
+    expect(calls.some((c) => c.method === 'PATCH' && (c.body ?? '').includes('issuerMode'))).toBe(true);
+    // already enabled → no PATCH
+    const { transport: t2, calls: c2 } = createFakeTransport([
+      { urlPrefix: '/v9/projects/prj_t1?', body: { oidcTokenConfig: { enabled: true, issuerMode: 'team' } } },
+    ]);
+    const adapter2 = createVercelAdapter({ token: 't', teamId: 'team_x', transport: t2 });
+    const res2 = await adapter2.enableVercelOidc('prj_t1');
+    expect(res2.ok).toBe(true);
+    expect(c2.filter((c) => c.method === 'PATCH').length).toBe(0);
+  });
+
+  it('Vercel adapter verifyEnv fails closed on missing keys', async () => {
+    const { transport } = createFakeTransport([
+      { urlPrefix: '/env', body: [{ key: 'WIF_AUDIENCE', value: 'x' }] },
+      { urlPrefix: '/env', body: [{ key: 'WIF_AUDIENCE', value: 'x' }] },
+    ]);
+    const adapter = createVercelAdapter({ token: 't', teamId: 'team_x', transport });
+    const ok = await adapter.verifyEnv('prj_t1', ['WIF_AUDIENCE']);
+    expect(ok.ok).toBe(true);
+    const missing = await adapter.verifyEnv('prj_t1', ['WIF_AUDIENCE', 'CUSTOMER_MONITORING_SA']);
+    expect(missing.ok).toBe(false);
+    if (missing.ok) throw new Error('expected verifyEnv failure');
+    expect((missing as { reason: string }).reason).toContain('CUSTOMER_MONITORING_SA');
+  });
+
+  it('Places key adapter: idempotent skip when VITE_PLACES_API_KEY already exists (retry never re-exposes the raw key)', async () => {
+    const { transport, calls } = createFakeTransport([{ urlPrefix: '/env', body: [{ key: 'VITE_PLACES_API_KEY', value: null }] }]);
+    const adapter = createPlacesKeyAdapter({ token: 't', teamId: 'team_x', transport });
+    const res = await adapter.configurePlacesKey('prj_t1', 'AIzaSyA_TEST_KEY_0000000000000000000000');
+    expect(res.ok).toBe(true);
+    expect(calls.filter((c) => c.method === 'POST').length).toBe(0); // no write — key never re-sent
+  });
+
+  it('Places key adapter: missing key + missing env → OWNER ACTION HOLD (no write)', async () => {
+    const { transport } = createFakeTransport([{ urlPrefix: '/env', body: [] }]);
+    const adapter = createPlacesKeyAdapter({ token: 't', teamId: 'team_x', transport });
+    const res = await adapter.configurePlacesKey('prj_t1');
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error('expected owner-action failure');
+    expect((res as { reason: string }).reason).toContain('OWNER ACTION REQUIRED');
+  });
+
+  it('Upstash ACL admin: path-style REST commands (SETUSER/RESTTOKEN/DELUSER), RESTTOKEN returns the token', async () => {
+    const { transport, calls } = createFakeTransport([
+      { urlPrefix: '/acl/setuser', body: { result: 'OK' } },
+      { urlPrefix: '/acl/resttoken', body: { result: 'rest_tok_abc' } },
+    ]);
+    const admin = createUpstashRedisAclAdmin({ adminUrl: 'https://central.upstash.io', adminToken: 'admin-tok', transport });
+    await admin.run('ACL SETUSER lf_t123 on >pw ~tenant:t1:* +get +set');
+    const token = await admin.restToken('lf_t123', 'pw');
+    expect(token).toBe('rest_tok_abc');
+    // path-style: command lowercased; subcommand/args verbatim (case-insensitive on the Redis side)
+    expect(calls[0].url.toLowerCase()).toContain('/acl/setuser/');
+    expect(calls[1].url.toLowerCase()).toContain('/acl/resttoken/');
+    // admin token only in the Authorization header
+    expect(calls.every((c) => !(c.url + (c.body ?? '')).includes('admin-tok'))).toBe(true);
+  });
+
+  it('Usage smoke adapter: full 10-point sequence against the deployed app', async () => {
+    const { transport } = createFakeTransport([
+      { urlPrefix: 'https://abc.leadfinder.business/', body: '<!DOCTYPE html><html>' },
+      { urlPrefix: '/api/usage', body: { used: 0, cap: 1000, safetyStop: 900, month: '2026-08', sessionId: 'sess-1', maxSessionRequests: 50, source: 'monitoring' } },
+      { urlPrefix: '/api/session?mode=status', body: { active: true, sessionId: 'sess-1', used: 0 } },
+      { urlPrefix: '/api/session?mode=release', body: { ok: true } },
+      { urlPrefix: '/api/session?mode=status', body: { active: false, used: 0 } },
+      { urlPrefix: '/api/device?mode=probe', body: { mode: 'locked', maxDevices: 2, kvConfigured: true, appPassConfigured: true, tenantIdConfigured: true } },
+    ]);
+    const adapter = createUsageSmokeAdapter({ transport });
+    const res = await adapter.run('abc.leadfinder.business');
+    expect(res.ok).toBe(true);
+    expect(res.smoke?.capIs1000).toBe(true);
+    expect(res.smoke?.safetyStopIs900).toBe(true);
+    expect(res.smoke?.maxSessionIs50).toBe(true);
+    expect(res.smoke?.monitoringSource).toBe(true);
+    expect(res.smoke?.tenantIdentityExact).toBe(true);
+    expect(res.smoke?.noActiveLeaseAfterRelease).toBe(true);
+    expect(res.smoke?.deviceProbeLocked).toBe(true);
+  });
+
+  it('Usage smoke adapter fails closed when /api/usage is blocked or locked', async () => {
+    const { transport } = createFakeTransport([
+      { urlPrefix: 'https://abc.leadfinder.business/', body: '<!DOCTYPE html><html>' },
+      { urlPrefix: '/api/usage', body: { used: 950, cap: 1000, safetyStop: 900, month: '2026-08', blocked: true } },
+    ]);
+    const adapter = createUsageSmokeAdapter({ transport });
+    const res = await adapter.run('abc.leadfinder.business');
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error('expected smoke failure');
+    expect((res as { reason: string }).reason).toContain('BLOCKED');
+  });
+
+  it('Google adapter billing isolation: exactly ONE linked project == customer project', async () => {
+    const { transport } = createFakeTransport([{ urlPrefix: '/projects', body: { projects: [{ projectId: 'abc-leadfinder-1234', billingEnabled: true }] } }]);
+    const adapter = createGoogleAdapter({ accessTokenProvider: async () => 'tok', transport });
+    const ok = await adapter.verifyBillingIsolation('01B61E-759031-B494E4', 'abc-leadfinder-1234');
+    expect(ok.ok).toBe(true);
+    const { transport: t2 } = createFakeTransport([{ urlPrefix: '/projects', body: { projects: [
+      { projectId: 'abc-leadfinder-1234', billingEnabled: true },
+      { projectId: 'other-5678', billingEnabled: true },
+    ] } }]);
+    const adapter2 = createGoogleAdapter({ accessTokenProvider: async () => 'tok', transport: t2 });
+    const fail = await adapter2.verifyBillingIsolation('01B61E-759031-B494E4', 'abc-leadfinder-1234');
+    expect(fail.ok).toBe(false);
+    const { transport: t3 } = createFakeTransport([{ urlPrefix: '/projects', body: { projects: [{ projectId: 'other-5678', billingEnabled: true }] } }]);
+    const adapter3 = createGoogleAdapter({ accessTokenProvider: async () => 'tok', transport: t3 });
+    const wrong = await adapter3.verifyBillingIsolation('01B61E-759031-B494E4', 'abc-leadfinder-1234');
+    expect(wrong.ok).toBe(false);
+  });
+
+  it('Google adapter pre-activation usage: 0 passes; non-zero fails closed for the owner review', async () => {
+    const { transport } = createFakeTransport([{ urlPrefix: '/timeSeries', body: { timeSeries: [] } }]);
+    const adapter = createGoogleAdapter({ accessTokenProvider: async () => 'tok', transport });
+    const zero = await adapter.preActivationPlacesUsage('abc-leadfinder-1234');
+    expect(zero.ok).toBe(true);
+    expect(zero.usage).toBe(0);
+    const { transport: t2 } = createFakeTransport([{ urlPrefix: '/timeSeries', body: { timeSeries: [{ points: [{ value: { int64Value: '5' } }] }] } }]);
+    const adapter2 = createGoogleAdapter({ accessTokenProvider: async () => 'tok', transport: t2 });
+    const five = await adapter2.preActivationPlacesUsage('abc-leadfinder-1234');
+    expect(five.ok).toBe(true);
+    expect(five.usage).toBe(5);
   });
 
   it('no privileged credential appears in adapter request shapes (token only in Authorization header)', async () => {

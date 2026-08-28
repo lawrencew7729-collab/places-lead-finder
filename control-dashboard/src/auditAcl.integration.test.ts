@@ -114,9 +114,9 @@ describe('hosted Supabase audit writer ACL correction', () => {
       },
     ]);
     const names = orderedMigrations();
-    // 010 (B2 safety stop 900 defaults) is now the latest migration;
+    // 011 (billing/ACL/WIF evidence columns) is now the latest migration;
     // the ACL contract itself was fixed in 004 and remains unchanged.
-    expect(names[names.length - 1]).toBe('010_b2_safety_stop_900_default.sql');
+    expect(names[names.length - 1]).toBe('011_billing_acl_wif_evidence.sql');
     expect(names).toContain('004_fix_audit_function_acl.sql');
     expect(names).toContain('005_quota_contract_alignment.sql');
     expect(names).toContain('006_full_fingerprint_contract.sql');
