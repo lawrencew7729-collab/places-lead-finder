@@ -22,8 +22,7 @@
     document.documentElement.className += ok ? ' plf-in' : ' plf-out';
   })();
 </script>
-<script src="https://cdn.tailwindcss.com"></script>
-<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script async src="https://cdn.tailwindcss.com"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -205,10 +204,6 @@
       </div>
       <div class="flex items-center gap-2">
         <button onclick="clearTable()" class="mono text-[11px] font-semibold text-slate-400 hover:text-white border border-white/10 px-3 py-1.5 rounded-lg transition-colors">CLEAR</button>
-        <button id="export-btn" onclick="exportExcel()" disabled
-          class="bg-gradient-to-r from-[#0ABAB5] to-[#22D3EE] hover:brightness-110 text-white mono text-[11px] font-bold px-4 py-1.5 rounded-lg shadow-md shadow-cyan-500/20 transition-all disabled:opacity-30 disabled:cursor-not-allowed">
-          ⬇ EXPORT .XLSX
-        </button>
       </div>
     </div>
     <div class="overflow-auto max-h-[520px]">

@@ -150,7 +150,9 @@ try { plfAuthed = sessionStorage.getItem('plf_ok') === '1'; } catch (e) {}
 })();
 
 /* ================= splash → reveal ================= */
-window.addEventListener('load', () => {
+// v1.0.9: DOMContentLoaded (NOT window load) — external CDN/stylesheet/font
+// completion must never gate portal boot (permanent-LOADING fix).
+document.addEventListener('DOMContentLoaded', () => {
   setTimeout(() => {
     const s = document.getElementById('splash');
     if (s) { s.classList.add('splash-fade'); setTimeout(() => { s.style.display = 'none'; }, 500); }
@@ -324,7 +326,6 @@ function syncStats() {
   document.getElementById('st-closed').textContent = closed;
   document.getElementById('st-nonmobile').textContent = nonmobile;
   document.getElementById('st-outrange').textContent = outRange;
-  updateExportState();
 }
 function processPlaces(places, a, radiusM, doFilter) {
   let added = 0;
@@ -635,37 +636,11 @@ function appendRow(p, n) {
 }
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 
-function updateExportState() {
-  document.getElementById('export-btn').disabled = rows.length === 0;
-}
-
-/* ================= export ================= */
-function exportExcel() {
-  if (!rows.length) return;
-  const headers = ['Company Name', 'Address', 'Phone', 'Website'];
-  const data = [headers, ...rows.map(p => [
-    (p.displayName || {}).text || '',
-    p.formattedAddress || '',
-    phoneOf(p),
-    p.websiteUri || ''
-  ])];
-  const ws = XLSX.utils.aoa_to_sheet(data);
-  ws['!cols'] = [{ wch: 32 }, { wch: 60 }, { wch: 20 }, { wch: 45 }];
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Places');
-  const kw = (document.getElementById('grid-kw').value.trim() || 'search').replace(/[^a-z0-9]+/gi, '_');
-  const area = (gridCenters[0] ? gridCenters[0].name : document.getElementById('grid-area').value.trim() || 'all').replace(/[^a-z0-9]+/gi, '_');
-  const date = new Date().toISOString().slice(0, 10);
-  XLSX.writeFile(wb, `${kw}_${area}_${date}.xlsx`);
-  showRunStatus('✓ EXPORTED ' + rows.length + ' COMPANIES');
-}
-
 function clearTable() {
   if (!rows.length) return;
   rows = []; seen = new Set();
   document.getElementById('tbody').innerHTML = '';
   resetStats();
-  updateExportState();
   document.getElementById('empty-state').classList.remove('hidden');
 }
 
@@ -685,4 +660,4 @@ document.getElementById('grid-kw').addEventListener('input', debounceSuggest);
 debounceSuggest();
 
 /* expose handlers referenced by inline HTML attributes (Vite module scope is not global) */
-Object.assign(window, { clearTable, deepSearch, doLogin, exportExcel, locateArea, runSearch, stopSearch, toggleAdv, useKeyword });
+Object.assign(window, { clearTable, deepSearch, doLogin, locateArea, runSearch, stopSearch, toggleAdv, useKeyword });
