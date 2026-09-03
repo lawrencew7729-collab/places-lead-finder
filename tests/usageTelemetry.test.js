@@ -138,4 +138,18 @@ describe('R1 CENTRALIZED — telemetry UX layer (server is the authority)', () =
     expect(SESSION_CONTRACT.safetyStop).toBe(900);
     expect(SESSION_CONTRACT.allowance).toBe(1000);
   });
+
+  it('setQuota pre-seeds cap/safetyStop from the customer quota config (regression: setQuota is not a function crashed app boot)', () => {
+    const t = createUsageTelemetry({ fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }) });
+    expect(t.allowance()).toBe(SESSION_CONTRACT.allowance);
+    expect(t.safetyStop()).toBe(SESSION_CONTRACT.safetyStop);
+    // app.js calls telemetry.setQuota(customerQuota()) at module top level — must exist and apply
+    t.setQuota({ monthlyTarget: 1000, redRequests: 900 });
+    expect(t.allowance()).toBe(1000);
+    expect(t.safetyStop()).toBe(900);
+    // invalid values are ignored (fail-closed, never lowers the contract)
+    t.setQuota({ monthlyTarget: -5, redRequests: 0 });
+    expect(t.allowance()).toBe(1000);
+    expect(t.safetyStop()).toBe(900);
+  });
 });

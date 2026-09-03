@@ -178,6 +178,13 @@ export function createUsageHandler(deps = {}) {
       // 3. atomic reconcile floor — usage can NEVER move backward.
       const reconciled = await redis.eval(RECONCILE_SCRIPT, [usageKey], [String(monitoringUsed)]);
       const effectiveStart = Math.max(monitoringUsed, Number(reconciled ?? monitoringUsed));
+      // 3b. READ-ONLY peek (owner-approved 2026-09-03): portal entry/refresh
+      //     usage display. Returns the shared Monitoring usage WITHOUT
+      //     acquiring/renewing the active_search lease and WITHOUT creating a
+      //     session or incrementing usage — repeated peeks must never lock.
+      if (req.query && req.query.mode === 'peek') {
+        return res.json({ used: effectiveStart, cap, safetyStop: SAFETY_STOP, month, source: 'monitoring', peek: true });
+      }
       // 4. SAFETY STOP: 900 blocks NEW top-level RUN (B2 owner decision 2026-08-27:
       //    max app-originated traffic = 899 + 50 session = 949 < 1000 Enterprise cap).
       if (effectiveStart >= SAFETY_STOP) {

@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { customerQuota, DEFAULT_QUOTA, quotaThresholds } from '../src/config.js';
 
@@ -68,6 +70,16 @@ describe('customer quota contract — B2 safety 1000 allowance / 850 amber / 900
   it('J10: no legacy 5000 literal remains in the quota module', () => {
     const source = DEFAULT_QUOTA.toString() + customerQuota.toString();
     expect(source).not.toContain('5000');
+  });
+
+  it('J11: no legacy 5,000 literal remains in the UI (budget cap + auto-stop are dynamic)', () => {
+    const html = readFileSync(resolve(process.cwd(), 'index.html'), 'utf8');
+    expect(html).not.toContain('5,000');
+    expect(html).not.toContain('/ 5,000');
+    expect(html).not.toContain('AUTO-STOPS AT 5,000');
+    // dynamic cap/auto-stop anchors exist
+    expect(html).toContain('id="budget-cap"');
+    expect(html).toContain('id="budget-auto-stop"');
   });
 });
 

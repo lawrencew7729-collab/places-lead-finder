@@ -1,4 +1,8 @@
-  :root { --brand: #0ABAB5; --cyan: #22D3EE; }
+  @tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { --brand: #0ABAB5; --cyan: #22D3EE; }
   html { color-scheme: dark; }
   /* pre-paint auth gate: returning users skip login page entirely; strangers never see dashboard flash behind overlay */
   html.plf-in #login-overlay { display: none !important; }

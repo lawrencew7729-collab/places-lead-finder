@@ -31,6 +31,17 @@ export function createUsageTelemetry({ fetchImpl, now = () => Date.now() } = {})
   let sessionAttempts = 0;  // UX mirror — server is the authority
   let inflightPromise = null;
 
+  /**
+   * Pre-seed the UX quota display from the build-time customer quota config
+   * (server /api/usage responses remain authoritative and overwrite these).
+   * Accepts customerQuota() shape: { monthlyTarget, redRequests, ... }.
+   */
+  function setQuota(q) {
+    if (!q) return;
+    if (typeof q.monthlyTarget === 'number' && Number.isFinite(q.monthlyTarget) && q.monthlyTarget > 0) cap = q.monthlyTarget;
+    if (typeof q.redRequests === 'number' && Number.isFinite(q.redRequests) && q.redRequests > 0) safetyStop = q.redRequests;
+  }
+
   /** One Monitoring query max per top-level RUN (server does reconcile+lease). */
   function startRun(deviceId) {
     if (inflightPromise) return inflightPromise;
@@ -107,6 +118,7 @@ export function createUsageTelemetry({ fetchImpl, now = () => Date.now() } = {})
     claimRequest,
     releaseSession,
     status,
+    setQuota,
     hasSession: () => Boolean(sessionId),
     sessionAttempts: () => sessionAttempts,
     effectiveUsage: () => used ?? 0,

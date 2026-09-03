@@ -7,3 +7,4 @@ _fields.html
 _pricing.html
 node_modules/
 dist/
+.env.local

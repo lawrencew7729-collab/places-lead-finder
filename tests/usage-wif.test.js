@@ -228,4 +228,37 @@ describe('R1 v1.0.6 WIF two-stage auth (STS -> IAMCredentials -> Monitoring)', (
     expect(serialized).not.toContain('sa-token-1');
     expect(serialized).not.toContain('oidc-token-1');
   });
+
+  it('mode=peek is READ-ONLY: repeated peeks create ZERO active_search locks and NO sessionId (regression: portal refresh locked RUN SEARCH)', async () => {
+    const fetchImpl = scriptedFetch();
+    const { redis, calls } = memoryRedis();
+    const handler = handlerWith({ fetchImpl, redis });
+    for (let i = 0; i < 3; i++) {
+      const res = fakeRes();
+      await handler({ query: { mode: 'peek' } }, res);
+      expect(res.statusCode).toBe(200);
+      expect(res.body.used).toBe(42);            // shared Monitoring value
+      expect(res.body.source).toBe('monitoring');
+      expect(res.body.peek).toBe(true);
+      expect(res.body.sessionId).toBeUndefined(); // never creates a session
+    }
+    const lockSets = calls.filter((c) => c[0] === 'set' && String(c[1]).includes('active_search'));
+    expect(lockSets.length).toBe(0);              // zero lease writes
+    const lockGets = calls.filter((c) => c[0] === 'get' && String(c[1]).includes('active_search'));
+    expect(lockGets.length).toBe(0);              // peek does not even read the lease
+  });
+
+  it('normal RUN (no mode) still acquires the 120s search lease (start path unchanged)', async () => {
+    const fetchImpl = scriptedFetch();
+    const { redis, calls } = memoryRedis();
+    const res = fakeRes();
+    await handlerWith({ fetchImpl, redis })({ query: { deviceId: 'dev-1' } }, res);
+    expect(res.statusCode).toBe(200);
+    expect(res.body.sessionId).toBeTruthy();      // session acquired
+    const lockSet = calls.find((c) => c[0] === 'set' && String(c[1]).includes('active_search') && c[4] === 'NX');
+    expect(lockSet).toBeTruthy();                 // SET NX lease
+    expect(lockSet[2]).toBe('EX');                // TTL applied
+    expect(res.body.leaseTtlSeconds).toBe(120);
+    expect(res.body.source).toBe('monitoring');
+  });
 });

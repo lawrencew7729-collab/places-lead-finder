@@ -22,7 +22,7 @@
     document.documentElement.className += ok ? ' plf-in' : ' plf-out';
   })();
 </script>
-<script async src="https://cdn.tailwindcss.com"></script>
+<link rel="stylesheet" href="/src/styles.css">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -172,13 +172,13 @@
         <div class="mono text-[10px] tracking-[0.25em] text-slate-500 uppercase flex items-center gap-2">
           <span class="text-[#22D3EE]">▮</span> Quota Telemetry
         </div>
-        <p class="text-xs text-slate-500 mt-1.5">Text Search Pro SKU · free tier · <span id="quota-src" class="mono text-[10px] font-bold px-2 py-0.5 rounded-md bg-white/5 border border-white/10 text-slate-500">APP-LOCAL</span></p>
+        <p class="text-xs text-slate-500 mt-1.5">Text Search Enterprise SKU · first 1,000/mo free · <span id="quota-src" class="mono text-[10px] font-bold px-2 py-0.5 rounded-md bg-white/5 border border-white/10 text-slate-500">APP-LOCAL</span></p>
       </div>
       <div class="text-right">
         <div class="flex items-baseline justify-end gap-2">
           <span class="mono text-[11px] text-slate-500 uppercase tracking-widest">REQ Used</span>
           <span id="budget-used" class="mono text-4xl font-bold text-[#0ABAB5] glow-text">0</span>
-          <span class="mono text-sm text-slate-500">/ 5,000</span>
+          <span class="mono text-sm text-slate-500">/ <span id="budget-cap" class="mono text-sm text-slate-500">1,000</span></span>
         </div>
         <p id="budget-pct" class="mono text-[10px] font-bold text-slate-400 mt-1"></p>
         <p id="reset-info" class="mono text-[10px] text-slate-600 mt-1"></p>
@@ -187,7 +187,7 @@
     <div class="h-2.5 bg-white/5 rounded-full mt-4 overflow-hidden border border-white/5">
       <div id="budget-bar" class="h-full rounded-full bar-glow transition-all duration-500" style="width:0%; background:linear-gradient(90deg,#0ABAB5,#67E8F9); box-shadow:0 0 14px rgba(10,186,181,0.6);"></div>
     </div>
-    <p class="mono text-[10px] text-slate-600 mt-2.5">LIVE = GOOGLE MONITORING (REAL USAGE, ~2-5 MIN DELAY) · APP-LOCAL = THIS BROWSER ONLY · AUTO-STOPS AT 5,000</p>
+    <p class="mono text-[10px] text-slate-600 mt-2.5">LIVE = GOOGLE MONITORING (REAL USAGE, ~2-5 MIN DELAY) · APP-LOCAL = THIS BROWSER ONLY · <span id="budget-auto-stop">AUTO-STOPS AT 900</span></p>
   </section>
 
   <!-- ===== Card 3: Result Stream ===== -->

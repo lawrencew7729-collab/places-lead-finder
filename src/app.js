@@ -19,6 +19,15 @@ const EXPECTED_ORIGINS = [
 ];
 const FIELDS = 'places.id,places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.internationalPhoneNumber,places.websiteUri,places.businessStatus,places.location,nextPageToken';
 
+/* ================= splash → reveal (registered FIRST — module crashes must
+   never leave the splash/LOADING screen stuck) ================= */
+function revealSplash() {
+  const s = document.getElementById('splash');
+  if (s) { s.classList.add('splash-fade'); setTimeout(() => { s.style.display = 'none'; }, 500); }
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', revealSplash);
+else revealSplash();
+
 /* R1 REVISED QUOTA SAFETY — event-driven telemetry (owner-approved 2026-08-26):
    ONE Monitoring fetch per top-level RUN SEARCH; DEEP/STOP/refresh/idle = 0;
    effectiveUsage = monitoringBase + localSessionDelta; safety stop at 900. */
@@ -88,6 +97,16 @@ function enterApp() {
   document.documentElement.classList.add('plf-in');
   document.getElementById('login-overlay').classList.add('hidden');
   document.getElementById('login-err').classList.add('hidden');
+  // Shared-usage refresh on every portal entry/refresh: display the same Google
+  // Monitoring number on every device. mode=peek is READ-ONLY — it must never
+  // acquire the active_search lease (that would lock the user out of RUN).
+  // Local storage remains ONLY the fallback when this fetch genuinely fails.
+  fetch('/api/usage?mode=peek', { cache: 'no-store' })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((j) => {
+      if (j && typeof j.used === 'number' && Number.isFinite(j.used)) { liveUsage = j.used; updateBudgetUI(); }
+    })
+    .catch(() => { /* keep local fallback — display degrade only */ });
 }
 
 function showLogin(reason) {
@@ -148,16 +167,6 @@ try { plfAuthed = sessionStorage.getItem('plf_ok') === '1'; } catch (e) {}
     else if (j.reason === 'limit') showLogin('limit');
   } catch (e) { /* keep login visible on network failure */ }
 })();
-
-/* ================= splash → reveal ================= */
-// v1.0.9: DOMContentLoaded (NOT window load) — external CDN/stylesheet/font
-// completion must never gate portal boot (permanent-LOADING fix).
-document.addEventListener('DOMContentLoaded', () => {
-  setTimeout(() => {
-    const s = document.getElementById('splash');
-    if (s) { s.classList.add('splash-fade'); setTimeout(() => { s.style.display = 'none'; }, 500); }
-  }, 1400);
-});
 
 /* ================= domain check ================= */
 const onOfficialDomain = EXPECTED_ORIGINS.includes(location.origin);
@@ -259,9 +268,10 @@ function gridParamsFor(a) {
 
 /* ================= budget UI ================= */
 function currentUsage() {
-  // Server-authoritative shared usage (last claim/RUN response); falls back to
-  // the browser-local estimate only for display before any session exists.
-  return telemetry.hasSession() || liveUsage !== null ? telemetry.effectiveUsage() : getUsage();
+  // liveUsage (server-shared Google Monitoring value) takes priority; then an
+  // active search session's last authoritative response; browser-local estimate
+  // only when neither exists (fetch genuinely failed or before first contact).
+  return liveUsage !== null ? liveUsage : telemetry.hasSession() ? telemetry.effectiveUsage() : getUsage();
 }
 function monthKey() { return new Date().toISOString().slice(0, 7); }
 function getUsage() {
@@ -278,6 +288,8 @@ function updateBudgetUI() {
   const quota = customerQuota();
   const used = currentUsage(), pct = Math.min(100, Math.round(used / quota.monthlyTarget * 100));
   document.getElementById('budget-used').textContent = used.toLocaleString();
+  document.getElementById('budget-cap').textContent = quota.monthlyTarget.toLocaleString();
+  document.getElementById('budget-auto-stop').textContent = 'AUTO-STOPS AT ' + quota.redRequests.toLocaleString();
   document.getElementById('header-budget').textContent = used.toLocaleString() + '/' + quota.monthlyTarget.toLocaleString();
   document.getElementById('budget-pct').textContent = pct + '% · SAFETY STOP AT ' + quota.redRequests.toLocaleString() + ' · 50/SEARCH SESSION';
   const now = new Date();

@@ -32,14 +32,15 @@ describe('v1.0.9 CDN-independent boot + Excel removal', () => {
     expect(splashBlock).not.toContain("window.addEventListener('load'");
   });
 
-  it('external Tailwind script is async and cannot block the boot path', () => {
-    const tailwind = HTML.match(/<script[^>]*src="https:\/\/cdn\.tailwindcss\.com"[^>]*>/);
-    expect(tailwind).not.toBeNull();
-    if (tailwind) expect(tailwind[0]).toContain('async');
-    // NO other external CDN script remains
+  it('NO external CDN scripts remain — styling is local/static (tailwind vendored via src/styles.css)', () => {
+    // no runtime CDN script at all (tailwind previously async, xlsx removed)
     const externalScripts = [...HTML.matchAll(/<script[^>]*src="https:[^"]*"[^>]*>/g)].map((m) => m[0]);
-    expect(externalScripts.length).toBe(1);
-    expect(externalScripts[0]).toContain('cdn.tailwindcss.com');
+    expect(externalScripts.length).toBe(0);
+    expect(HTML).not.toContain('cdn.tailwindcss.com');
+    // local stylesheet drives the tailwind directives
+    const css = readFileSync(join(process.cwd(), 'src', 'styles.css'), 'utf8');
+    expect(css).toContain('@tailwind base');
+    expect(css).toContain('@tailwind utilities');
   });
 
   it('domain gate behavior from v1.0.8 remains intact (VITE_CUSTOMER_ORIGIN expansion)', () => {
