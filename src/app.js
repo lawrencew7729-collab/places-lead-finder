@@ -9,7 +9,14 @@ const API_URL = 'https://places.googleapis.com/v1/places:searchText';
 // without the env never ships a working key. The key is browser-visible by
 // design (referrer-restricted; residual documented in the activation contract).
 const EMBEDDED_KEY = import.meta.env?.VITE_PLACES_API_KEY || '«redacted:AIza…»';
-const EXPECTED_ORIGINS = ['https://places-lead-finder-site.vercel.app', 'https://leadfinder.business'];
+const EXPECTED_ORIGINS = [
+  'https://places-lead-finder-site.vercel.app',
+  'https://leadfinder.business',
+  // v1.0.8: customer deployments inject their own official origin at build time
+  // (VITE_CUSTOMER_ORIGIN — set by provisioning; keeps the domain gate meaningful
+  // while allowing the customer subdomain to run searches).
+  ...(import.meta.env?.VITE_CUSTOMER_ORIGIN ? [import.meta.env.VITE_CUSTOMER_ORIGIN] : []),
+];
 const FIELDS = 'places.id,places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.internationalPhoneNumber,places.websiteUri,places.businessStatus,places.location,nextPageToken';
 
 /* R1 REVISED QUOTA SAFETY — event-driven telemetry (owner-approved 2026-08-26):
