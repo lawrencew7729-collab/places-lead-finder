@@ -408,8 +408,8 @@ describe('R1 provisioning executor (15-stage PRE-R1 model)', () => {
     expect(result.outcome).toBe('CUSTOMER_READY');
     const handed = lastHandedOffDeviceLockSecrets();
     expect(handed).not.toBeNull();
-    // the fake admin mints rest_tok_<username> — the env must receive exactly that token
-    expect(handed?.kvRestApiToken).toBe(`rest_tok_${aclUsernameFor(result.tenantId)}`);
+    // the fake admin mints an Upstash-style GENTOKEN (gt-fake-N) — the env must receive exactly that token
+    expect(handed?.kvRestApiToken).toMatch(/^gt-fake-\d+$/);
     expect(handed?.kvRestApiUrl).toBe(CENTRAL_STORE);
   });
 
@@ -421,14 +421,21 @@ describe('R1 provisioning executor (15-stage PRE-R1 model)', () => {
     expect(result.failedStageId).toBe('usage_smoke');
   });
 
-  it('pre-existing activation-month usage stops at billing (owner review)', async () => {
+  it('non-zero activation-month usage is RECORDED but does NOT block provisioning (owner decision 2026-09-04 — smoke itself creates usage)', async () => {
     const providers = createFakeProviders();
     await registerGolden(providers);
-    providers.setPreActivationUsage('abc-leadfinder-1234', 7);
+    providers.setPreActivationUsage('abc-leadfinder-1234', 27);
     const result = await runProvisioning(providers, input(), transient());
-    expect(result.outcome).toBe('FAILED');
-    expect(result.failedStageId).toBe('billing');
-    expect(result.stages.find((s) => s.id === 'billing')?.detail).toContain('OWNER REVIEW REQUIRED');
+    expect(result.outcome).toBe('CUSTOMER_READY'); // not blocked
+    expect(result.failedStageId).toBeNull();
+    // usage still read + recorded as evidence (billing stage passed, detail contains the value)
+    const billingStage = result.stages.find((s) => s.id === 'billing');
+    expect(billingStage?.status).toBe('PASS');
+    // persisted config still carries the evidence columns
+    const readback = await providers.controlPlane.findConfigByTenant(result.tenantId);
+    expect(readback.config?.billingAccountId).toBe(BILLING_ACCOUNT);
+    expect(readback.config?.billingPreActivationUsage).toBe(27);
+    expect(readback.config?.billingActivationMonth).toMatch(/^\d{4}-(0[1-9]|1[0-2])$/);
   });
 
   it('billing account with more than one linked project stops at billing (isolation contract)', async () => {
@@ -466,5 +473,32 @@ describe('R1 provisioning executor (15-stage PRE-R1 model)', () => {
     expect(second.outcome).toBe('CUSTOMER_READY');
     // audience is org-level — no per-customer variance
     expect(wifAudienceFor(input().wif!)).toBe(wifAudienceFor(input({ slug: 'xyz' }).wif!));
+  });
+
+  it('tenant starts setup_pending; successful CUSTOMER_READY flips it to active (2026-09-04 status consistency)', async () => {
+    const providers = createFakeProviders();
+    await registerGolden(providers);
+    expect(providers.__getTenantStatus(input().slug)).toBeUndefined(); // not created yet
+    const result = await runProvisioning(providers, input(), transient());
+    expect(result.outcome).toBe('CUSTOMER_READY');
+    expect(providers.__getTenantStatus(input().slug)).toBe('active');
+  });
+
+  it('failure BEFORE finalization leaves the tenant at setup_pending (never active)', async () => {
+    const providers = createFakeProviders({ failAt: ['usageSmoke.run'] });
+    await registerGolden(providers);
+    const result = await runProvisioning(providers, input(), transient());
+    expect(result.outcome).toBe('FAILED');
+    expect(providers.__getTenantStatus(input().slug)).toBe('setup_pending');
+  });
+
+  it('idempotent re-run of an already-active tenant stays active (no drift)', async () => {
+    const providers = createFakeProviders();
+    await registerGolden(providers);
+    const first = await runProvisioning(providers, input(), transient());
+    expect(first.outcome).toBe('CUSTOMER_READY');
+    const second = await runProvisioning(providers, input(), transient());
+    expect(second.outcome).toBe('CUSTOMER_READY');
+    expect(providers.__getTenantStatus(input().slug)).toBe('active');
   });
 });

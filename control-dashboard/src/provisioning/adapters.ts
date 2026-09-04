@@ -68,11 +68,32 @@ export function createFakeTransport(script: Array<{ urlPrefix: string; status?: 
   return { transport, calls };
 }
 
+/**
+ * Google IAM member matching with type-prefix normalization.
+ * Google members are stored with a type prefix (user:, serviceAccount:, group:…).
+ * Callers may pass the bare email — treat both forms as equal.
+ */
+export function memberPresent(members: readonly string[], member: string): boolean {
+  return members.includes(member) || (!member.includes(':') && members.includes(`user:${member}`));
+}
+
+/** Returns the exact stored form of the member (for precise removal). */
+export function memberIn(members: readonly string[], member: string): string | undefined {
+  if (members.includes(member)) return member;
+  if (!member.includes(':')) {
+    const prefixed = `user:${member}`;
+    if (members.includes(prefixed)) return prefixed;
+  }
+  return undefined;
+}
+
 /** GET the current env key→value map of a Vercel project (plain values readable). */
 async function readProjectEnv(transport: Transport, api: string, projectId: string, teamId: string, auth: (extra?: Record<string, string>) => Record<string, string>) {
   const res = await transport(`${api}/v9/projects/${encodeURIComponent(projectId)}/env?teamId=${encodeURIComponent(teamId)}`, { headers: auth() });
   if (!res.ok) return { ok: false as const, reason: `vercel readEnv ${res.status}` };
-  const envList = (await res.json()) as Array<{ key: string; value?: string | null }>;
+  const body = (await res.json()) as { envs?: Array<{ key: string; value?: string | null }> } | Array<{ key: string; value?: string | null }>;
+  // Vercel GET /v9/projects/{id}/env returns { envs: [...] }; accept a bare array defensively.
+  const envList = Array.isArray(body) ? body : (body.envs ?? []);
   const map = new Map<string, string | null>();
   for (const e of envList) map.set(e.key, e.value ?? null);
   return { ok: true as const, env: map };
@@ -85,6 +106,11 @@ async function readProjectEnv(transport: Transport, api: string, projectId: stri
 export interface VercelAdapterOptions {
   token: string; // server-side only
   teamId: string;
+  /**
+   * GitHub repository numeric id used for gitSource deployments (v13 requires repoId).
+   * Lead Finder source-of-truth repo: lawrencew7729-collab/places-lead-finder (id 1319226252).
+   */
+  repoId?: number;
   /**
    * CENTRAL model: the deployment ALWAYS receives the customer's own
    * restricted ACL credential (never a shared/full-access token), so the
@@ -114,7 +140,7 @@ export function createVercelAdapter(options: VercelAdapterOptions): import('./pr
           framework: 'vite',
           buildCommand: 'npm run build',
           outputDirectory: 'dist',
-          rootDirectory: '',
+          // rootDirectory intentionally OMITTED (empty string caused Vercel 400 invalid_root_directory; repo root is the project root)
         }),
       });
       if (!res.ok) return { ok: false, reason: `vercel createProject ${res.status}` };
@@ -129,7 +155,8 @@ export function createVercelAdapter(options: VercelAdapterOptions): import('./pr
         body: JSON.stringify({
           name: projectId,
           project: projectId,
-          gitSource: { type: 'github', ref: release.tag },
+          // v13 requires the numeric repoId for github gitSource (fix: 400 missing repoId)
+          gitSource: { type: 'github', repoId: options.repoId ?? 1319226252, ref: release.tag },
           target: 'production',
         }),
       });
@@ -139,12 +166,34 @@ export function createVercelAdapter(options: VercelAdapterOptions): import('./pr
     },
 
     async bindDomain(projectId, hostname) {
+      // Idempotent (owner-approved 2026-09-03): already attached to THIS project → reuse, no POST.
+      const listRes = await transport(`${api}/v10/projects/${encodeURIComponent(projectId)}/domains?teamId=${encodeURIComponent(options.teamId)}`, { headers: auth() });
+      if (listRes.ok) {
+        const listJson = (await listRes.json()) as { domains?: Array<{ name?: string; projectId?: string }> };
+        const existing = (listJson.domains ?? []).find((d) => d.name === hostname);
+        if (existing) {
+          if (existing.projectId && existing.projectId !== projectId) {
+            return { ok: false, reason: `domain already bound to another project (${existing.projectId}) — fail closed, never steal/move` };
+          }
+          return { ok: true, resourceId: hostname }; // reuse — no duplicate POST
+        }
+      }
       const res = await transport(`${api}/v10/projects/${encodeURIComponent(projectId)}/domains?teamId=${encodeURIComponent(options.teamId)}`, {
         method: 'POST',
         headers: auth(),
         body: JSON.stringify({ name: hostname }),
       });
-      if (!res.ok) return { ok: false, reason: `vercel bindDomain ${res.status}` };
+      if (!res.ok) {
+        // domain_already_in_use → verify ownership: THIS project is acceptable; another project is FAIL CLOSED.
+        const errBody = (await res.json().catch(() => ({}))) as { error?: { code?: string; projectId?: string } };
+        if (errBody.error?.code === 'domain_already_in_use') {
+          if (errBody.error.projectId && errBody.error.projectId !== projectId) {
+            return { ok: false, reason: `domain already bound to another project (${errBody.error.projectId}) — fail closed, never steal/move` };
+          }
+          return { ok: true, resourceId: hostname }; // same project already owns it → reuse
+        }
+        return { ok: false, reason: `vercel bindDomain ${res.status}` };
+      }
       return { ok: true, resourceId: hostname };
     },
 
@@ -162,6 +211,8 @@ export function createVercelAdapter(options: VercelAdapterOptions): import('./pr
         ['CUSTOMER_GOOGLE_PROJECT_ID', env.googleProjectId, 'encrypted'],
         ['WIF_AUDIENCE', env.wifAudience, 'plain'],
         ['CUSTOMER_MONITORING_SA', env.centralMonitoringSa, 'plain'],
+        // v1.0.8 — customer origin for the frontend domain gate (build-time)
+        ['VITE_CUSTOMER_ORIGIN', env.customerOrigin, 'plain'],
       ];
       const read = await readProjectEnv(transport, api, projectId, options.teamId, auth);
       if (!read.ok) return read;
@@ -388,7 +439,7 @@ export function createControlPlaneAdapter(options: ControlPlaneAdapterOptions): 
         slug: input.slug,
         exact_subdomain: input.hostname,
         status: 'setup_pending',
-        created_by: '00000000-0000-0000-0000-000000000000', // replaced by server layer with the operator id
+        created_by: options.operatorUserId, // FK to auth.users — real operator id (fix: all-zero UUID caused 409)
       }) });
       if (!res.ok) return { ok: false, reason: `cp insertTenant ${res.status}` };
       const rows = (await res.json()) as Array<{ id?: string }>;
@@ -397,6 +448,15 @@ export function createControlPlaneAdapter(options: ControlPlaneAdapterOptions): 
       return { ok: true, resourceId: id };
     },
 
+    async updateTenantStatus(tenantId, status) {
+      const res = await transport(`${api}/tenants?id=eq.${encodeURIComponent(tenantId)}`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ status }),
+      });
+      if (!res.ok) return { ok: false, reason: `cp updateTenantStatus ${res.status}` };
+      return { ok: true, resourceId: tenantId };
+    },
     async insertCustomerConfig(config) {
       // explicit quota contract values — NEVER schema defaults; PRE-R1
       // billing/ACL evidence (migration 011) — NON-SECRET only.
@@ -421,7 +481,7 @@ export function createControlPlaneAdapter(options: ControlPlaneAdapterOptions): 
         acl_username: config.aclUsername ?? null,
         acl_token_fingerprint: config.aclTokenFingerprint ?? null,
         monitoring_sa_email: config.monitoringSaEmail ?? null,
-        updated_by: '00000000-0000-0000-0000-000000000000',
+        updated_by: options.operatorUserId, // FK to auth.users — real operator id (fix: all-zero UUID caused 409)
       }) });
       if (!res.ok) return { ok: false, reason: `cp insertCustomerConfig ${res.status}` };
       return { ok: true, resourceId: config.tenantId };
@@ -652,7 +712,9 @@ export function createGoogleAdapter(options: GoogleAdapterOptions): import('./pr
 
     // A3b: customer's OWN monitoring SA in the CUSTOMER project (idempotent find-before-create).
     async createMonitoringServiceAccount(googleProjectId, accountId) {
-      const saUrl = `https://iam.googleapis.com/v1/projects/${encodeURIComponent(googleProjectId)}/serviceAccounts/${encodeURIComponent(accountId)}`;
+      // IAM API resource lookup requires the full email (accountId alone is not a valid resource name → false 404)
+      const saEmail = `${accountId}@${googleProjectId}.iam.gserviceaccount.com`;
+      const saUrl = `https://iam.googleapis.com/v1/projects/${encodeURIComponent(googleProjectId)}/serviceAccounts/${encodeURIComponent(saEmail)}`;
       const findRes = await transport(saUrl, { headers: await bearer() });
       if (findRes.ok) {
         const found = (await findRes.json()) as { email?: string };
@@ -663,7 +725,8 @@ export function createGoogleAdapter(options: GoogleAdapterOptions): import('./pr
       const createRes = await transport(`https://iam.googleapis.com/v1/projects/${encodeURIComponent(googleProjectId)}/serviceAccounts?accountId=${encodeURIComponent(accountId)}`, {
         method: 'POST',
         headers: await bearer(),
-        body: JSON.stringify({ displayName: 'LeadFinder customer monitoring', description: 'Per-customer monitoring SA (A3b); USER_MANAGED keys = 0' }),
+        // IAM API schema: displayName/description live inside the nested serviceAccount object
+        body: JSON.stringify({ serviceAccount: { displayName: 'LeadFinder customer monitoring', description: 'Per-customer monitoring SA (A3b); USER_MANAGED keys = 0' } }),
       });
       if (!createRes.ok) return { ok: false, reason: `wif createServiceAccount ${createRes.status}` };
       const created = (await createRes.json()) as { email?: string };
@@ -775,19 +838,80 @@ export function createGoogleAdapter(options: GoogleAdapterOptions): import('./pr
       return { ok: true, resourceId: member };
     },
 
-    // Billing-account isolation (READ-ONLY): exactly ONE linked project == customer project.
+    // Project-side billing evidence (OWNER-APPROVED 2026-08-31): NO billing-account
+    // IAM grant. Uses projects.getBillingInfo (permission: billing.resourceAssociations.list
+    // at PROJECT scope): project identity + linked billing account + billingEnabled=true.
+    // The dedicated-account "exactly one linked project" rule is a HUMAN CHECKPOINT
+    // (operator confirms face-to-face) — never automated via billing-account IAM.
     async verifyBillingIsolation(billingAccountId, googleProjectId) {
-      const res = await transport(`https://cloudbilling.googleapis.com/v1/billingAccounts/${encodeURIComponent(billingAccountId)}/projects`, {
+      const res = await transport(`https://cloudbilling.googleapis.com/v1/projects/${encodeURIComponent(googleProjectId)}/billingInfo`, {
         headers: await bearer(),
       });
-      if (!res.ok) return { ok: false, reason: `billing listProjects ${res.status}` };
-      const body = (await res.json()) as { projects?: Array<{ projectId?: string; billingEnabled?: boolean }> };
-      const linked = (body.projects ?? []).filter((p) => p.billingEnabled !== false);
-      if (linked.length !== 1) return { ok: false, reason: `billing account links ${linked.length} enabled project(s) (exactly 1 required)` };
-      if (linked[0].projectId !== googleProjectId) {
-        return { ok: false, reason: `billing account project (${linked[0].projectId}) ≠ customer project (${googleProjectId})` };
+      if (!res.ok) return { ok: false, reason: `billing getBillingInfo ${res.status}` };
+      const body = (await res.json()) as { projectId?: string; billingAccountName?: string; billingEnabled?: boolean };
+      if (body.projectId !== googleProjectId) return { ok: false, reason: `billing project identity mismatch (${body.projectId ?? 'none'})` };
+      if (body.billingAccountName !== `billingAccounts/${billingAccountId}`) {
+        return { ok: false, reason: `billing account mismatch (${body.billingAccountName ?? 'none'} ≠ billingAccounts/${billingAccountId})` };
       }
+      if (body.billingEnabled !== true) return { ok: false, reason: 'billingEnabled ≠ true (account not open/active)' };
       return { ok: true, resourceId: billingAccountId };
+    },
+
+    // Bootstrap cleanup: remove ONLY the exact (role, member) binding on the customer
+    // project — other members, other roles and any binding conditions are preserved.
+    // Idempotent: member absent -> ok. Etag-safe: read policy (with etag + policyVersion),
+    // modify, write back with the SAME etag (optimistic concurrency).
+    async removeExactRoleBinding(googleProjectId, role, member) {
+      const getRes = await transport(`https://cloudresourcemanager.googleapis.com/v1/projects/${encodeURIComponent(googleProjectId)}:getIamPolicy`, {
+        method: 'POST',
+        headers: await bearer(),
+        body: JSON.stringify({ options: { requestedPolicyVersion: 3 } }),
+      });
+      if (!getRes.ok) return { ok: false, reason: `google getIamPolicy ${getRes.status}` };
+      const policy = (await getRes.json()) as { bindings?: Array<{ role: string; members: string[]; condition?: unknown }>; etag?: string; version?: number };
+      const bindings = policy.bindings ?? [];
+      // ROOT-CAUSE FIX (2026-09-04): select the binding where the NORMALIZED member
+      // is actually present (not role-first). Google members carry a type prefix
+      // (e.g. 'user:admin@leadfinder.business'); callers may pass the bare email.
+      const found = bindings.find((b) => b.role === role && memberPresent(b.members, member));
+      if (!found) return { ok: true, resourceId: role }; // idempotent — already absent
+      const actual = memberIn(found.members, member);
+      const nextMembers = actual ? found.members.filter((m) => m !== actual) : found.members;
+      const nextBindings = nextMembers.length === 0
+        ? bindings.filter((b) => b !== found)
+        : bindings.map((b) => (b === found ? { ...b, members: nextMembers } : b));
+      const setRes = await transport(`https://cloudresourcemanager.googleapis.com/v1/projects/${encodeURIComponent(googleProjectId)}:setIamPolicy`, {
+        method: 'POST',
+        headers: await bearer(),
+        body: JSON.stringify({
+          policy: { version: policy.version ?? 1, bindings: nextBindings, etag: policy.etag },
+          updateMask: 'bindings,etag',
+        }),
+      });
+      if (!setRes.ok) return { ok: false, reason: `google setIamPolicy ${setRes.status}` };
+      // FIX: verify the RETURNED updated policy actually no longer binds the member —
+      // a 200 alone must not be treated as removal proof.
+      const updated = (await setRes.json().catch(() => null)) as { bindings?: Array<{ role: string; members: string[] }> } | null;
+      if (updated && (updated.bindings ?? []).some((b) => b.role === role && memberPresent(b.members, member))) {
+        return { ok: false, reason: `google setIamPolicy: member still bound after removal (${role})` };
+      }
+      return { ok: true, resourceId: role };
+    },
+
+    // Bootstrap cleanup readback: every listed role must no longer contain the member.
+    async verifyBootstrapRolesAbsent(googleProjectId, roles, member) {
+      const getRes = await transport(`https://cloudresourcemanager.googleapis.com/v1/projects/${encodeURIComponent(googleProjectId)}:getIamPolicy`, {
+        method: 'POST',
+        headers: await bearer(),
+        body: JSON.stringify({ options: { requestedPolicyVersion: 3 } }),
+      });
+      if (!getRes.ok) return { ok: false, reason: `google getIamPolicy ${getRes.status}` };
+      const policy = (await getRes.json()) as { bindings?: Array<{ role: string; members: string[] }> };
+      // FIX: check the NORMALIZED member across ALL bindings (role-first matching
+      // could miss the member when the same role has multiple bindings).
+      const remaining = roles.filter((role) => (policy.bindings ?? []).some((b) => b.role === role && memberPresent(b.members, member)));
+      if (remaining.length > 0) return { ok: false, reason: `bootstrap roles still bound to ${member}: ${remaining.join(', ')}` };
+      return { ok: true, resourceId: googleProjectId };
     },
 
     // Pre-activation usage: broad Places request_count in the Pacific activation
@@ -902,6 +1026,13 @@ export function createUpstashRedisAclAdmin(options: UpstashRedisAclAdminOptions)
   return {
     async run(commandLine) {
       await command(commandLine);
+    },
+    async gentoken(username) {
+      // Upstash syntax: ACL GENTOKEN <username> → a REST token bound to that user,
+      // usable as its SETUSER password AND as its REST bearer token.
+      const result = await command(`ACL GENTOKEN ${username}`);
+      if (typeof result !== 'string' || result.length === 0) throw new Error('upstash acl GENTOKEN: unexpected response');
+      return result;
     },
     async restToken(username, password) {
       // ACL RESTTOKEN <user> <password> → the REST bearer token for that ACL user.

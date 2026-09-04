@@ -281,6 +281,7 @@ export async function runProvisioning(
       googleProjectId: input.googleProjectId.trim(),
       wifAudience: wifAudienceFor(wifConfig),
       centralMonitoringSa: customerSaEmail,
+      customerOrigin: `https://${hostname}`, // v1.0.8 — unlocks the frontend domain gate on the customer subdomain
     });
     if (!r.ok) return r;
     const readback = await providers.vercel.verifyEnv(projectId, [...REQUIRED_RUNTIME_ENV_KEYS]);
@@ -465,11 +466,12 @@ export async function runProvisioning(
   });
   if (!deviceLockOk) return finish(providers, tenantId, hostname, stages, rollbackMetadata);
 
-  // Stage 14 — billing-account evidence (READ-ONLY): the customer billing
-  // account must link EXACTLY ONE project (the customer Lead Finder project)
-  // and the activation (Pacific) month must have ZERO pre-existing Places
-  // usage — otherwise STOP for owner review. Never claims billing
-  // reconciliation (Monitoring is a conservative proxy, no SKU dimension).
+  // Stage 14 — billing-account evidence (READ-ONLY): project-side getBillingInfo
+  // (billingEnabled=true) + activation (Pacific) month usage read as EVIDENCE.
+  // Owner decision 2026-09-04: non-zero activation-month usage must NOT block —
+  // provisioning/smoke itself creates legitimate activation-month usage on a
+  // fresh project (observed 27 during the Jacker dummy pilot: real-device
+  // tests + referrer preflights). Usage is recorded in evidence only.
   let billingMonth = '';
   let preActivationUsage = 0;
   const billingOk = await runStage('billing', async () => {
@@ -477,9 +479,6 @@ export async function runProvisioning(
     if (!isolation.ok) return isolation;
     const usage = await providers.google.preActivationPlacesUsage(input.googleProjectId.trim());
     if (!usage.ok) return usage;
-    if ((usage.usage ?? 0) > 0) {
-      return { ok: false, reason: `OWNER REVIEW REQUIRED: pre-existing Places usage (${usage.usage}) in activation month` };
-    }
     billingMonth = pacificBillingMonth();
     preActivationUsage = usage.usage ?? 0;
     return { ok: true, resourceId: input.billingAccountId };
@@ -502,6 +501,9 @@ export async function runProvisioning(
       if (!q.consistent || !p.consistent) {
         return { ok: false, reason: `persisted config mismatch: ${[...q.reasons, ...p.reasons].join('; ')}` };
       }
+      // idempotent re-run of an already-provisioned tenant — ensure status is active.
+      const st = await providers.controlPlane.updateTenantStatus(tenantId, 'active');
+      if (!st.ok) return st;
       return { ok: true, resourceId: tenantId }; // already provisioned — idempotent
     }
 
@@ -529,6 +531,10 @@ export async function runProvisioning(
     if (!check.consistent) return { ok: false, reason: `persisted quota mismatch: ${check.reasons.join('; ')}` };
     const policyCheck = verifyDeviceLockPolicy(readback.ok && readback.config ? readback.config.devicePolicy : null);
     if (!policyCheck.consistent) return { ok: false, reason: `persisted device policy mismatch: ${policyCheck.reasons.join('; ')}` };
+    // Status consistency (2026-09-04): successful finalization → active.
+    // Fails closed: if the status cannot be flipped the run must not claim CUSTOMER_READY.
+    const statusUpdate = await providers.controlPlane.updateTenantStatus(tenantId, 'active');
+    if (!statusUpdate.ok) return statusUpdate;
     await providers.controlPlane.insertAudit({ tenantId, action: 'CUSTOMER_PROVISIONED', detail: `slug=${input.slug}` });
     return { ok: true, resourceId: tenantId };
   });

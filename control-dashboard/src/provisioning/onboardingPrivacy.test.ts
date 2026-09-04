@@ -49,16 +49,16 @@ describe('OWNER DECISION 2 — no customer Google account admin access', () => {
     }
   });
 
-  it('billing interaction is READ-ONLY: verifyBillingIsolation issues only GET, never writes or touches payment data', async () => {
+  it('billing interaction is READ-ONLY: verifyBillingIsolation issues only GET (projects.getBillingInfo), never writes or touches payment data', async () => {
     const { transport, calls } = createFakeTransport([
-      { urlPrefix: '/projects', body: { projects: [{ projectId: 'customer-a-google-123', billingEnabled: true }] } },
+      { urlPrefix: '/projects/customer-a-google-123/billingInfo', body: { projectId: 'customer-a-google-123', billingAccountName: 'billingAccounts/01B61E-759031-B494E4', billingEnabled: true } },
     ]);
     const adapter = createGoogleAdapter({ accessTokenProvider: async () => 'tok', transport });
     const res = await adapter.verifyBillingIsolation('01B61E-759031-B494E4', 'customer-a-google-123');
     expect(res.ok).toBe(true);
     expect(calls).toHaveLength(1);
     expect(calls[0].method).toBe('GET');
-    expect(calls[0].url).toContain('/billingAccounts/01B61E-759031-B494E4/projects');
+    expect(calls[0].url).toContain('/projects/customer-a-google-123/billingInfo');
     // no payment/card endpoint ever contacted
     expect(calls[0].url).not.toMatch(/payment|cards|invoices|transactions/i);
   });

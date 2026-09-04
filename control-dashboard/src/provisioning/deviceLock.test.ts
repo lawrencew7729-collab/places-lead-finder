@@ -199,7 +199,7 @@ describe('R1 TWO-DEVICE CONTRACT — secret boundary (executor)', () => {
     const handed = lastHandedOffDeviceLockSecrets();
     expect(handed?.appPass).toBe(APP_PASS);
     expect(handed?.kvRestApiUrl).toBe(STORE_A);
-    expect(handed?.kvRestApiToken).toBe(`rest_tok_${aclUsernameFor(result.tenantId)}`);
+    expect(handed?.kvRestApiToken).toMatch(/^gt-fake-\d+$/); // Upstash GENTOKEN (fake) — the tenant REST token
     // raw values never in stages / rollback / audit / persisted config
     const serialized = JSON.stringify({ stages: result.stages, rollback: result.rollbackMetadata });
     expect(serialized).not.toContain(APP_PASS);

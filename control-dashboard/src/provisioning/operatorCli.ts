@@ -83,6 +83,54 @@ export interface OperatorCliResult {
   outcome: 'CUSTOMER_READY' | 'FAILED' | 'REFUSED' | 'ABORTED';
   reason?: string;
   result?: ProvisioningResult;
+  /** Bootstrap-cleanup outcome (only present when provisioning reached CUSTOMER_READY). */
+  bootstrapCleanup?: { status: 'REMOVED' | 'CLEANUP_REQUIRED'; roles: string[]; reason?: string };
+}
+
+/**
+ * TEMPORARY PROJECT-SCOPED BOOTSTRAP (owner-approved 2026-08-31):
+ * the Lead Finder operator principal is granted ONLY these project-scoped roles by the
+ * customer for the provisioning window, then actively removed with readback proof.
+ * roles/viewer is required for projects.getBillingInfo (billing.resourceAssociations.list
+ * at project scope) — billing-account IAM is deliberately NEVER requested.
+ */
+export const BOOTSTRAP_MEMBER = 'admin@leadfinder.business';
+export const BOOTSTRAP_ROLES = [
+  'roles/iam.serviceAccountAdmin',
+  'roles/iam.serviceAccountViewer',
+  'roles/monitoring.viewer',
+  'roles/viewer',
+  // projectIamAdmin LAST (2026-09-04): removing it revokes the ability to read
+  // the project policy — every earlier removal must complete before it goes.
+  'roles/resourcemanager.projectIamAdmin',
+] as const;
+
+/** Active cleanup of the temporary bootstrap IAM after successful provisioning (idempotent, readback-proven). */
+async function cleanupBootstrap(providers: ProvisioningProviders, googleProjectId: string): Promise<{ status: 'REMOVED' | 'CLEANUP_REQUIRED'; roles: string[]; reason?: string }> {
+  const failures: string[] = [];
+  // projectIamAdmin LAST (2026-09-04): removing it revokes project-policy read,
+  // so every other removal + the readback must happen while it is still bound.
+  const adminRole = 'roles/resourcemanager.projectIamAdmin';
+  const earlierRoles = BOOTSTRAP_ROLES.filter((r) => r !== adminRole);
+  for (const role of earlierRoles) {
+    const r = await providers.google.removeExactRoleBinding(googleProjectId, role, BOOTSTRAP_MEMBER);
+    if (!r.ok) failures.push(`${role}: ${'reason' in r ? r.reason : 'failed'}`);
+  }
+  // readback BEFORE removing projectIamAdmin (identity still holds policy-read).
+  // Each removeExactRoleBinding already verifies its setIamPolicy response.
+  if (failures.length === 0) {
+    const readback = await providers.google.verifyBootstrapRolesAbsent(googleProjectId, [...earlierRoles], BOOTSTRAP_MEMBER);
+    if (!readback.ok) failures.push(`readback: ${'reason' in readback ? readback.reason : 'failed'}`);
+  }
+  // final removal — its verified setIamPolicy response is the last proof.
+  if (failures.length === 0) {
+    const r = await providers.google.removeExactRoleBinding(googleProjectId, adminRole, BOOTSTRAP_MEMBER);
+    if (!r.ok) failures.push(`${adminRole}: ${'reason' in r ? r.reason : 'failed'}`);
+  }
+  if (failures.length > 0) {
+    return { status: 'CLEANUP_REQUIRED', roles: [...BOOTSTRAP_ROLES], reason: failures.join('; ') };
+  }
+  return { status: 'REMOVED', roles: [...BOOTSTRAP_ROLES] };
 }
 
 /** Full 64-hex uppercase SHA-256 fingerprint of the raw Places key (the ONLY form persisted). */
@@ -214,6 +262,14 @@ export async function runOperatorCli(deps: OperatorCliDeps): Promise<OperatorCli
   // metadata, non-secret identities). The executor guarantees raw values
   // never enter serializable state; the evidence writer refuses any
   // secret-shaped content as a belt-and-braces check.
+  // 6b. TEMPORARY BOOTSTRAP CLEANUP (owner-approved 2026-08-31): after a
+  // successful provisioning, actively remove the customer-granted temporary
+  // project IAM for the operator principal and prove absence. Failure is an
+  // explicit CLEANUP_REQUIRED state (never silent persistent human access).
+  let bootstrapCleanup: { status: 'REMOVED' | 'CLEANUP_REQUIRED'; roles: string[]; reason?: string } | undefined;
+  if (result.outcome === 'CUSTOMER_READY') {
+    bootstrapCleanup = await cleanupBootstrap(deps.providers, deps.args.googleProjectId);
+  }
   await deps.io.writeEvidence({
     provisionedAt: new Date().toISOString(),
     tenant: { slug: deps.args.slug, hostname: result.hostname, tenantId: result.tenantId },
@@ -234,7 +290,8 @@ export async function runOperatorCli(deps: OperatorCliDeps): Promise<OperatorCli
     failedStageId: result.failedStageId,
     stages: result.stages.map((s) => ({ id: s.id, status: s.status, detail: s.detail, resourceId: s.resourceId })),
     rollbackMetadata: result.rollbackMetadata,
+    bootstrapCleanup,
   });
 
-  return { outcome: result.outcome, result };
+  return { outcome: result.outcome, result, bootstrapCleanup };
 }

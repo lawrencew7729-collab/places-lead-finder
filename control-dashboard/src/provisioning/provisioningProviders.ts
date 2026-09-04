@@ -103,6 +103,8 @@ export interface RuntimeEnvInput {
   wifAudience: string;
   /** PRE-R1 — impersonated monitoring SA (non-secret; default = central SA). */
   centralMonitoringSa: string;
+  /** v1.0.8 — customer official origin (https://<hostname>) injected at build time; unlocks the domain gate. */
+  customerOrigin: string;
 }
 
 export interface VercelProvider {
@@ -165,6 +167,10 @@ export interface GoogleProvider {
   grantWorkloadIdentityUser(projectId: string, wif: WifConfig, customerMonitoringSa: string): Promise<ProviderResult>;
   /** A3b: readback — provider template + SA in customer project + keys=0 + exact binding + roles on customer project only. */
   verifyWifOnboarding(projectId: string, wif: WifConfig, customerMonitoringSa: string, googleProjectId: string): Promise<ProviderResult>;
+  /** Bootstrap cleanup: remove ONLY the exact (role, member) binding; preserve other members, other roles and conditions; idempotent; etag-safe. */
+  removeExactRoleBinding(googleProjectId: string, role: string, member: string): Promise<ProviderResult>;
+  /** Bootstrap cleanup readback: every listed role must no longer contain the member. */
+  verifyBootstrapRolesAbsent(googleProjectId: string, roles: string[], member: string): Promise<ProviderResult>;
   /** A3b: offboarding/rollback — remove the exact principalSet member from THAT customer's SA only. */
   revokeWifOnboarding(projectId: string, wif: WifConfig, customerMonitoringSa: string): Promise<ProviderResult>;
   /** PRE-R1 — billing account links EXACTLY ONE project == the customer project (read-only). */
@@ -175,6 +181,8 @@ export interface GoogleProvider {
 
 export interface ControlPlaneProvider {
   insertTenant(input: TenantInput): Promise<ProviderResult>;
+  /** 2026-09-04: successful finalization flips tenants.status setup_pending → active. */
+  updateTenantStatus(tenantId: string, status: string): Promise<ProviderResult>;
   insertCustomerConfig(config: CustomerConfigInput): Promise<ProviderResult>;
   insertRelease(identity: GoldenReleaseIdentity): Promise<ProviderResult>;
   insertAudit(event: { tenantId: string; action: string; detail: string }): Promise<ProviderResult>;
@@ -251,13 +259,17 @@ export interface FakeProviders extends ProvisioningProviders {
   setPreActivationUsage(googleProjectId: string, usage: number): void;
   /** Test control: billing account links MORE than one project (isolation violation). */
   setBillingProjects(billingAccountId: string, projectIds: string[]): void;
+  /** Test control: seed project IAM (role -> members) to simulate the customer's temporary bootstrap grant. */
+  __seedProjectIam(googleProjectId: string, role: string, members: string[]): void;
+  /** 2026-09-04 — test hook: read back a fake tenant's status by slug. */
+  __getTenantStatus(slug: string): string | undefined;
 }
 
 export function createFakeProviders(options: { failAt?: string[] } = {}): FakeProviders {
   const failures = new Set(options.failAt ?? []);
   const projects = new Map<string, string>(); // tenantId -> projectId
   const domains = new Map<string, string>(); // hostname -> projectId
-  const tenants = new Map<string, { id: string; hostname: string }>();
+  const tenants = new Map<string, { id: string; hostname: string; status: string }>();
   const configs = new Map<string, CustomerConfigInput>();
   const releases = new Map<string, GoldenReleaseIdentity>();
   const audits: Array<{ tenantId: string; action: string }> = [];
@@ -266,6 +278,7 @@ export function createFakeProviders(options: { failAt?: string[] } = {}): FakePr
   const projectEnv = new Map<string, Map<string, { value: string; encrypted: boolean }>>(); // projectId -> key -> value
   const oidcEnabled = new Set<string>(); // projectIds with team-mode OIDC
   let wifProviderCreated = false;
+  let aclGentokenCounter = 0;
   let wifProviderCondition = '';
   // A3b: per-customer monitoring SA state (SA lives in the CUSTOMER project).
   const customerSas = new Map<string, { googleProjectId: string; accountId: string; userManagedKeys: number; bindings: Set<string> }>(); // saEmail -> state
@@ -300,6 +313,15 @@ export function createFakeProviders(options: { failAt?: string[] } = {}): FakePr
     },
     setBillingProjects(billingAccountId: string, projectIds: string[]) {
       billingProjects.set(billingAccountId, projectIds);
+    },
+    __seedProjectIam(googleProjectId: string, role: string, members: string[]) {
+      const roles = projectIam.get(googleProjectId) ?? new Map<string, string[]>();
+      const existing = roles.get(role) ?? [];
+      roles.set(role, Array.from(new Set([...existing, ...members])));
+      projectIam.set(googleProjectId, roles);
+    },
+    __getTenantStatus(slug: string) {
+      return tenants.get(slug)?.status;
     },
     vercel: {
       async createProject(tenantId, slug) {
@@ -458,6 +480,28 @@ export function createFakeProviders(options: { failAt?: string[] } = {}): FakePr
         sa.bindings.delete(principalSetFor(projectId, wif));
         return { ok: true, resourceId: principalSetFor(projectId, wif) };
       },
+      async removeExactRoleBinding(googleProjectId, role, member) {
+        const fail = maybeFail('google.removeExactRoleBinding');
+        if (fail) return fail;
+        const roles = projectIam.get(googleProjectId);
+        const members = roles?.get(role);
+        // normalized matching — Google members carry type prefixes (user:…)
+        const present = members?.some((m) => m === member || (!member.includes(':') && m === `user:${member}`)) ?? false;
+        if (!members || !present) return { ok: true, resourceId: role }; // idempotent — nothing to remove
+        const actual = members.find((m) => m === member || (!member.includes(':') && m === `user:${member}`))!;
+        const next = members.filter((m) => m !== actual);
+        if (next.length === 0) roles!.delete(role);
+        else roles!.set(role, next);
+        return { ok: true, resourceId: role };
+      },
+      async verifyBootstrapRolesAbsent(googleProjectId, roles, member) {
+        const fail = maybeFail('google.verifyBootstrapRolesAbsent');
+        if (fail) return fail;
+        const projectRoles = projectIam.get(googleProjectId);
+        const remaining = roles.filter((role) => (projectRoles?.get(role) ?? []).some((m) => m === member || (!member.includes(':') && m === `user:${member}`)));
+        if (remaining.length > 0) return { ok: false, reason: `bootstrap roles still bound to ${member}: ${remaining.join(', ')}` };
+        return { ok: true, resourceId: googleProjectId };
+      },
       async verifyBillingIsolation(billingAccountId, googleProjectId) {
         const fail = maybeFail('google.verifyBillingIsolation');
         if (fail) return fail;
@@ -480,8 +524,17 @@ export function createFakeProviders(options: { failAt?: string[] } = {}): FakePr
         if (tenants.has(input.slug)) return { ok: true, resourceId: tenants.get(input.slug)!.id }; // idempotent
         if (!/^[A-F0-9]{64}$/.test(input.keyFingerprint)) return { ok: false, reason: 'full 64-hex uppercase fingerprint required' };
         const id = crypto.randomUUID();
-        tenants.set(input.slug, { id, hostname: input.hostname });
+        tenants.set(input.slug, { id, hostname: input.hostname, status: 'setup_pending' });
         return { ok: true, resourceId: id };
+      },
+      async updateTenantStatus(tenantId, status) {
+        const fail = maybeFail('cp.updateTenantStatus');
+        if (fail) return fail;
+        let entry: { id: string; hostname: string; status: string } | undefined;
+        tenants.forEach((t) => { if (t.id === tenantId) entry = t; });
+        if (!entry) return { ok: false, reason: 'cp updateTenantStatus: tenant not found' };
+        entry.status = status;
+        return { ok: true, resourceId: tenantId };
       },
       async insertCustomerConfig(config) {
         const fail = maybeFail('cp.insertCustomerConfig');
@@ -608,6 +661,11 @@ export function createFakeProviders(options: { failAt?: string[] } = {}): FakePr
       },
     },
     redisAcl: {
+      async gentoken(username) {
+        const fail = maybeFail('redisAcl.gentoken');
+        if (fail && fail.ok === false) throw new Error(fail.reason);
+        return `gt-fake-${++aclGentokenCounter}`; // Upstash-style GENTOKEN bound to the user (fake, deterministic-unique)
+      },
       async run(command) {
         const fail = maybeFail('redisAcl.run');
         if (fail && fail.ok === false) throw new Error(fail.reason);

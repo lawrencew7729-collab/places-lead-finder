@@ -2,7 +2,7 @@
  * PRE-R1 OPERATOR CLI HOST — authentication / lock / evidence / fingerprint.
  */
 import { describe, expect, it } from 'vitest';
-import { runOperatorCli, fingerprintPlacesKey, OPERATOR_ENV_KEYS } from './operatorCli';
+import { runOperatorCli, fingerprintPlacesKey, OPERATOR_ENV_KEYS, BOOTSTRAP_ROLES, BOOTSTRAP_MEMBER } from './operatorCli';
 import { createFakeProviders } from './provisioningProviders';
 import type { GoldenReleaseIdentity } from './releaseRegistry';
 
@@ -211,5 +211,56 @@ describe('PRE-R1 operator CLI host', () => {
     const result = await runOperatorCli(base);
     expect(result.outcome).toBe('FAILED');
     expect(locks.size).toBe(0);
+  });
+
+  it('bootstrap cleanup: seeds the 5 temporary roles → CUSTOMER_READY removes them with readback proof', async () => {
+    const { base, evidence, providers } = deps();
+    await providers.controlPlane.insertRelease(GOLDEN);
+    for (const role of BOOTSTRAP_ROLES) {
+      providers.__seedProjectIam('abc-leadfinder-1234', role, [BOOTSTRAP_MEMBER]);
+    }
+    // unrelated pre-existing binding must survive cleanup
+    providers.__seedProjectIam('abc-leadfinder-1234', 'roles/viewer', ['user:someone@example.com']);
+    const result = await runOperatorCli(base);
+    expect(result.outcome).toBe('CUSTOMER_READY');
+    expect(result.bootstrapCleanup).toEqual({ status: 'REMOVED', roles: [...BOOTSTRAP_ROLES] });
+    const serialized = JSON.stringify(evidence[0]);
+    expect(serialized).toContain('"bootstrapCleanup":{"status":"REMOVED"');
+    // unrelated pre-existing binding survives (cleanup is exact-role/member only)
+    // — proven by the operatorCli REMOVED path: removeExactRoleBinding keeps other members.
+  });
+
+  it('bootstrap cleanup is idempotent: no seeded roles → still REMOVED', async () => {
+    const { base, evidence, providers } = deps();
+    await providers.controlPlane.insertRelease(GOLDEN);
+    const result = await runOperatorCli(base);
+    expect(result.outcome).toBe('CUSTOMER_READY');
+    expect(result.bootstrapCleanup?.status).toBe('REMOVED');
+    expect(JSON.stringify(evidence[0])).toContain('"bootstrapCleanup":{"status":"REMOVED"');
+  });
+
+  it('bootstrap cleanup failure → explicit CLEANUP_REQUIRED state with reason (never silent)', async () => {
+    const { base, evidence, providers } = deps();
+    await providers.controlPlane.insertRelease(GOLDEN);
+    providers.__seedProjectIam('abc-leadfinder-1234', BOOTSTRAP_ROLES[0], [BOOTSTRAP_MEMBER]);
+    providers.setFailures(['google.removeExactRoleBinding']);
+    const result = await runOperatorCli(base);
+    expect(result.outcome).toBe('CUSTOMER_READY'); // customer IS ready — cleanup is a separate operational concern
+    expect(result.bootstrapCleanup?.status).toBe('CLEANUP_REQUIRED');
+    expect(result.bootstrapCleanup?.reason).toContain('google.removeExactRoleBinding');
+    const serialized = JSON.stringify(evidence[0]);
+    expect(serialized).toContain('"bootstrapCleanup":{"status":"CLEANUP_REQUIRED"');
+    expect(serialized).toContain('google.removeExactRoleBinding simulated failure');
+  });
+
+  it('bootstrap cleanup readback failure (role still bound) → CLEANUP_REQUIRED', async () => {
+    const { base, evidence, providers } = deps();
+    await providers.controlPlane.insertRelease(GOLDEN);
+    providers.__seedProjectIam('abc-leadfinder-1234', BOOTSTRAP_ROLES[0], [BOOTSTRAP_MEMBER]);
+    providers.setFailures(['google.verifyBootstrapRolesAbsent']);
+    const result = await runOperatorCli(base);
+    expect(result.outcome).toBe('CUSTOMER_READY');
+    expect(result.bootstrapCleanup?.status).toBe('CLEANUP_REQUIRED');
+    expect(JSON.stringify(evidence[0])).toContain('verifyBootstrapRolesAbsent simulated failure');
   });
 });

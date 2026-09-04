@@ -170,12 +170,12 @@ describe('R1 final closure — real server-side adapters', () => {
     const adapter = createVercelAdapter({ token: 't', teamId: 'team_x', transport });
     const created = await adapter.createProject('tenant-1', 'abc');
     expect(created.ok && created.resourceId).toBe('prj_new');
-    const env = await adapter.setRuntimeEnv('prj_new', { monthlyTarget: 1000, amberPercent: 85, redPercent: 90, enforcementMode: 'disable_new_search', googleProjectId: 'p1', wifAudience: '//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/p/providers/pr', centralMonitoringSa: 'sa@x.iam.gserviceaccount.com' });
+    const env = await adapter.setRuntimeEnv('prj_new', { monthlyTarget: 1000, amberPercent: 85, redPercent: 90, enforcementMode: 'disable_new_search', googleProjectId: 'p1', wifAudience: '//iam.googleapis.com/projects/123/locations/global/workloadIdentityPools/p/providers/pr', centralMonitoringSa: 'sa@x.iam.gserviceaccount.com', customerOrigin: 'https://abc.leadfinder.business' });
     expect(env.ok).toBe(true);
     const envCalls = calls.filter((c) => c.url.includes('/env'));
-    expect(envCalls.length).toBe(9); // 1 GET readback + 8 POSTs (4 VITE + server monthly + project + WIF_AUDIENCE + monitoring SA)
+    expect(envCalls.length).toBe(10); // 1 GET readback + 9 POSTs (5 VITE + server monthly + project + WIF_AUDIENCE + monitoring SA)
     const postedKeys = envCalls.filter((c) => c.method === 'POST').map((c) => JSON.parse(c.body ?? '{}').key);
-    expect(postedKeys).toContain('VITE_CUSTOMER_MONTHLY_TARGET');
+    expect(postedKeys).toContain('VITE_CUSTOMER_ORIGIN');
     expect(postedKeys).toContain('CUSTOMER_MONTHLY_TARGET');
     expect(postedKeys).toContain('WIF_AUDIENCE');
     expect(postedKeys).toContain('CUSTOMER_MONITORING_SA');
@@ -424,6 +424,43 @@ describe('R1 final closure — real server-side adapters', () => {
     expect((missing as { reason: string }).reason).toContain('CUSTOMER_MONITORING_SA');
   });
 
+  it('Vercel adapter readEnv handles the REAL { envs: [...] } response shape (regression: envList not iterable)', async () => {
+    const { transport, calls } = createFakeTransport([
+      { urlPrefix: '/env', body: { envs: [{ key: 'WIF_AUDIENCE', value: 'aud' }, { key: 'APP_PASS', value: null }] } },
+    ]);
+    const adapter = createVercelAdapter({ token: 't', teamId: 'team_x', transport });
+    // setRuntimeEnv reads existing env first (readProjectEnv path) then writes — force read-only verifyEnv path instead:
+    const ok = await adapter.verifyEnv('prj_t1', ['WIF_AUDIENCE']);
+    expect(ok.ok).toBe(true);
+    const missing = await adapter.verifyEnv('prj_t1', ['APP_PASS']);
+    expect(missing.ok).toBe(false); // APP_PASS present-but-null → treated as missing
+    if (missing.ok) throw new Error('expected verifyEnv failure');
+    expect((missing as { reason: string }).reason).toContain('APP_PASS');
+    // the read did not crash on the object-wrapped array shape
+    expect(calls.filter((c) => c.url.includes('/env')).length).toBeGreaterThan(0);
+  });
+
+  it('bindDomain idempotent: domain already attached to THIS project → reuse with NO duplicate POST (regression: 409 domain_already_in_use)', async () => {
+    const { transport, calls } = createFakeTransport([
+      { urlPrefix: '/domains', body: { domains: [{ name: 'jacker.leadfinder.business', projectId: 'prj_abc' }] } },
+    ]);
+    const adapter = createVercelAdapter({ token: 't', teamId: 'team_x', transport });
+    const ok = await adapter.bindDomain('prj_abc', 'jacker.leadfinder.business');
+    expect(ok.ok).toBe(true);
+    expect(calls.filter((c) => c.method === 'POST').length).toBe(0); // no duplicate bind
+  });
+
+  it('bindDomain FAIL CLOSED when the domain belongs to ANOTHER project (never steal/move)', async () => {
+    const { transport } = createFakeTransport([
+      { urlPrefix: '/domains', body: { domains: [{ name: 'jacker.leadfinder.business', projectId: 'prj_OTHER' }] } },
+    ]);
+    const adapter = createVercelAdapter({ token: 't', teamId: 'team_x', transport });
+    const bad = await adapter.bindDomain('prj_abc', 'jacker.leadfinder.business');
+    expect(bad.ok).toBe(false);
+    if (bad.ok) throw new Error('expected failure');
+    expect((bad as { reason: string }).reason).toContain('another project');
+  });
+
   it('Places key adapter: idempotent skip when VITE_PLACES_API_KEY already exists (retry never re-exposes the raw key)', async () => {
     const { transport, calls } = createFakeTransport([{ urlPrefix: '/env', body: [{ key: 'VITE_PLACES_API_KEY', value: null }] }]);
     const adapter = createPlacesKeyAdapter({ token: 't', teamId: 'team_x', transport });
@@ -531,22 +568,19 @@ describe('R1 final closure — real server-side adapters', () => {
     expect((res as { reason: string }).reason).toContain('BLOCKED');
   });
 
-  it('Google adapter billing isolation: exactly ONE linked project == customer project', async () => {
-    const { transport } = createFakeTransport([{ urlPrefix: '/projects', body: { projects: [{ projectId: 'abc-leadfinder-1234', billingEnabled: true }] } }]);
+  it('Google adapter billing isolation: project-side getBillingInfo — identity + account + billingEnabled (owner-approved 2026-08-31; exactly-one = human checkpoint)', async () => {
+    const { transport } = createFakeTransport([{ urlPrefix: '/projects/abc-leadfinder-1234/billingInfo', body: { projectId: 'abc-leadfinder-1234', billingAccountName: 'billingAccounts/01B61E-759031-B494E4', billingEnabled: true } }]);
     const adapter = createGoogleAdapter({ accessTokenProvider: async () => 'tok', transport });
     const ok = await adapter.verifyBillingIsolation('01B61E-759031-B494E4', 'abc-leadfinder-1234');
     expect(ok.ok).toBe(true);
-    const { transport: t2 } = createFakeTransport([{ urlPrefix: '/projects', body: { projects: [
-      { projectId: 'abc-leadfinder-1234', billingEnabled: true },
-      { projectId: 'other-5678', billingEnabled: true },
-    ] } }]);
+    const { transport: t2 } = createFakeTransport([{ urlPrefix: '/projects/abc-leadfinder-1234/billingInfo', body: { projectId: 'abc-leadfinder-1234', billingAccountName: 'billingAccounts/OTHER-999999', billingEnabled: true } }]);
     const adapter2 = createGoogleAdapter({ accessTokenProvider: async () => 'tok', transport: t2 });
     const fail = await adapter2.verifyBillingIsolation('01B61E-759031-B494E4', 'abc-leadfinder-1234');
     expect(fail.ok).toBe(false);
-    const { transport: t3 } = createFakeTransport([{ urlPrefix: '/projects', body: { projects: [{ projectId: 'other-5678', billingEnabled: true }] } }]);
+    const { transport: t3 } = createFakeTransport([{ urlPrefix: '/projects/abc-leadfinder-1234/billingInfo', body: { projectId: 'abc-leadfinder-1234', billingAccountName: 'billingAccounts/01B61E-759031-B494E4', billingEnabled: false } }]);
     const adapter3 = createGoogleAdapter({ accessTokenProvider: async () => 'tok', transport: t3 });
-    const wrong = await adapter3.verifyBillingIsolation('01B61E-759031-B494E4', 'abc-leadfinder-1234');
-    expect(wrong.ok).toBe(false);
+    const closed = await adapter3.verifyBillingIsolation('01B61E-759031-B494E4', 'abc-leadfinder-1234');
+    expect(closed.ok).toBe(false);
   });
 
   it('Google adapter pre-activation usage: 0 passes; non-zero fails closed for the owner review', async () => {

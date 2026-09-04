@@ -20,30 +20,32 @@ const TENANT_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
  * ACL SETUSER registers the user with its password; ACL RESTTOKEN returns a
  * DISTINCT REST bearer token bound to (username, password).
  */
-function memoryAdmin(restTokenFail = false) {
-  const users = new Map<string, string>(); // username -> password
-  const restTokens = new Map<string, string>(); // username -> REST token
+function memoryAdmin(gentokenFail = false) {
+  const users = new Map<string, string>(); // username -> gentoken (used as SETUSER password)
   const revoked = new Set<string>();
   const calls: string[] = [];
+  let gentokenSeq = 0;
   const admin: RedisAclAdmin = {
+    async gentoken(username) {
+      calls.push(`ACL GENTOKEN ${username}`);
+      if (gentokenFail) throw new Error('ACL GENTOKEN failed');
+      return `gt-${++gentokenSeq}-${createHash('sha256').update(String(Date.now())).digest('hex').slice(0, 12)}`; // Upstash-style
+    },
     async run(command) {
       calls.push(command);
       const m = command.match(/^ACL SETUSER (\S+) on >(\S+) (.*)$/);
       if (m) { users.set(m[1], m[2]); return; }
       const d = command.match(/^ACL DELUSER (\S+)$/);
-      if (d) { users.delete(d[1]); restTokens.delete(d[1]); revoked.add(d[1]); return; }
+      if (d) { users.delete(d[1]); revoked.add(d[1]); return; }
       throw new Error('unexpected admin command ' + command.slice(0, 40));
     },
     async restToken(username, password) {
       calls.push(`ACL RESTTOKEN ${username} <password>`);
-      if (restTokenFail) throw new Error('ACL RESTTOKEN failed');
       if (users.get(username) !== password) throw new Error('password mismatch');
-      const token = 'rest-' + createHash('sha256').update(username + ':' + password).digest('hex').slice(0, 32);
-      restTokens.set(username, token);
-      return token;
+      return 'legacy-rest-' + createHash('sha256').update(username + ':' + password).digest('hex').slice(0, 32);
     },
   };
-  return { admin, users, restTokens, revoked, calls };
+  return { admin, users, revoked, calls };
 }
 
 describe('R1 CENTRALIZED — per-tenant ACL provisioning (REST-TOKEN contract)', () => {
@@ -75,42 +77,38 @@ describe('R1 CENTRALIZED — per-tenant ACL provisioning (REST-TOKEN contract)',
     expect(allow.sort()).toEqual(['+del', '+eval', '+expire', '+get', '+incrby', '+set']);
   });
 
-  it('REST-TOKEN CONTRACT: SETUSER gets a generated password; RESTTOKEN called with EXACT username+password; the RETURNED REST token (NOT the password) is handed out', async () => {
-    const { admin, users, restTokens, calls } = memoryAdmin();
+  it('GENTOKEN CONTRACT: SETUSER password IS the ACL GENTOKEN result; that same token is handed out as the REST token; fingerprint-only persistence', async () => {
+    const { admin, users, calls } = memoryAdmin();
     const result = await provisionTenantAcl(admin, TENANT_A);
     expect(result.ok).toBe(true);
     const username = 'lf_taaaaaaaaaaaa';
 
-    // 1. SETUSER received a generated password (>=24 chars)
+    // 1. ACL GENTOKEN was called first WITH the tenant ACL username (Upstash syntax)
+    expect(calls[0]).toBe(`ACL GENTOKEN ${username}`);
+
+    // 2. SETUSER received the GENTOKEN result as its password (Upstash requirement)
     const setuser = calls.find((c) => c.startsWith('ACL SETUSER'))!;
-    const password = users.get(username)!;
-    expect(password.length).toBeGreaterThanOrEqual(24);
-    expect(setuser).toContain(`>${password}`);
+    const gentoken = users.get(username)!;
+    expect(gentoken.startsWith('gt-')).toBe(true);
+    expect(setuser).toContain(`>${gentoken}`);
     expect(setuser).toContain(`~tenant:${TENANT_A}:*`);
 
-    // 2. ACL RESTTOKEN was called with exact username + that password
-    expect(calls.some((c) => c === `ACL RESTTOKEN ${username} <password>`)).toBe(true);
+    // 3. NO RESTTOKEN exchange — the GENTOKEN result IS the REST token
+    expect(calls.some((c) => c.startsWith('ACL RESTTOKEN'))).toBe(false);
+    expect(result.transientToken).toBe(gentoken);
 
-    // 3. the transient token IS the RESTTOKEN return value, NOT the password
-    const restToken = restTokens.get(username)!;
-    expect(restToken).toBeTruthy();
-    expect(restToken).not.toBe(password);
-    expect(result.transientToken).toBe(restToken);
-
-    // 4. the fingerprint hashes the REST TOKEN, not the password
-    expect(result.identity.tokenFingerprint).toBe(aclTokenFingerprint(restToken));
-    expect(result.identity.tokenFingerprint).not.toBe(aclTokenFingerprint(password));
+    // 4. fingerprint hashes the GENTOKEN (REST token)
+    expect(result.identity.tokenFingerprint).toBe(aclTokenFingerprint(gentoken));
 
     // 5+6. neither raw value is persisted in the identity/result metadata
-    expect(JSON.stringify(result.identity)).not.toContain(password);
-    expect(JSON.stringify(result.identity)).not.toContain(restToken);
+    expect(JSON.stringify(result.identity)).not.toContain(gentoken);
   });
 
-  it('ACL RESTTOKEN failure: provisioning fails closed AND the ACL user is revoked (no orphan user)', async () => {
+  it('ACL GENTOKEN failure: provisioning fails closed with NOTHING created (no user, no revoke needed)', async () => {
     const { admin, users, revoked } = memoryAdmin(true);
-    await expect(provisionTenantAcl(admin, TENANT_A)).rejects.toThrow('ACL RESTTOKEN failed');
-    expect(users.has('lf_taaaaaaaaaaaa')).toBe(false); // revoked
-    expect(revoked.has('lf_taaaaaaaaaaaa')).toBe(true);
+    await expect(provisionTenantAcl(admin, TENANT_A)).rejects.toThrow('ACL GENTOKEN failed');
+    expect(users.has('lf_taaaaaaaaaaaa')).toBe(false); // nothing created
+    expect(revoked.has('lf_taaaaaaaaaaaa')).toBe(false); // nothing to revoke
   });
 
   it('rollback: revoke removes the tenant ACL user (provisioning failure path)', async () => {
@@ -126,21 +124,21 @@ describe('R1 CENTRALIZED — per-tenant ACL provisioning (REST-TOKEN contract)',
     const result = await provisionTenantAclWithRollback(admin, TENANT_A, async () => ({ ok: false, reason: 'vercel 403' }));
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('expected failure');
-    expect(result.reason).toContain('vercel 403');
+    expect((result as { reason: string }).reason).toContain('vercel 403');
     expect(users.has('lf_taaaaaaaaaaaa')).toBe(false);
     expect(revoked.has('lf_taaaaaaaaaaaa')).toBe(true);
   });
 
   it('successful handoff keeps the user and returns only non-secret identity', async () => {
-    const { admin, users, restTokens } = memoryAdmin();
+    const { admin, users } = memoryAdmin();
     const result = await provisionTenantAclWithRollback(admin, TENANT_A, async (token) => {
-      expect(token).toBe(restTokens.get('lf_taaaaaaaaaaaa')); // handoff receives the REST token
+      expect(token).toBe(users.get('lf_taaaaaaaaaaaa')); // handoff receives the GENTOKEN (REST token)
       return { ok: true };
     });
     expect(result.ok).toBe(true);
     expect(users.has('lf_taaaaaaaaaaaa')).toBe(true);
     if (result.ok) {
-      expect(JSON.stringify(result.identity)).not.toContain(restTokens.get('lf_taaaaaaaaaaaa')!);
+      expect(JSON.stringify(result.identity)).not.toContain(users.get('lf_taaaaaaaaaaaa')!);
     }
   });
 
