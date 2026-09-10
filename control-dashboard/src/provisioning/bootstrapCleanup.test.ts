@@ -3,9 +3,9 @@
  * Covers: getBillingInfo verification, exact-role/member removal, etag/condition
  * preservation, idempotency, readback, and empty-binding removal.
  */
-import { describe, expect, it, vi } from 'vitest';
-import { createGoogleAdapter } from './adapters';
-import { BOOTSTRAP_ROLES } from './operatorCli';
+import { describe, expect, it } from 'vitest';
+import { createGoogleAdapter } from './adapters.js';
+import { BOOTSTRAP_ROLES } from './operatorCli.js';
 
 type Call = { url: string; init?: { method?: string; body?: string } };
 
@@ -37,19 +37,19 @@ describe('project-side billing verification (getBillingInfo — no billing-accou
       status: 200,
       body: { projectId: PROJECT, billingAccountName: 'billingAccounts/01B61E-759031-B494E4', billingEnabled: true },
     }));
-    const r = await adapter.verifyBillingIsolation('01B61E-759031-B494E4', PROJECT);
+    const r = await adapter.verifyBillingReadback(PROJECT);
     expect(r.ok).toBe(true);
     expect(calls[0].url).toContain(`/v1/projects/${PROJECT}/billingInfo`);
   });
 
-  it('FAIL when the linked billing account differs', async () => {
+  it('returns the LINKED billing account as evidence (no expected-value comparison — S2e contract)', async () => {
     const { adapter } = makeAdapter(() => ({
       status: 200,
       body: { projectId: PROJECT, billingAccountName: 'billingAccounts/OTHER-ACCOUNT', billingEnabled: true },
     }));
-    const r = await adapter.verifyBillingIsolation('01B61E-759031-B494E4', PROJECT);
-    expect(r.ok).toBe(false);
-    expect((r as { reason: string }).reason).toContain('billing account mismatch');
+    const r = await adapter.verifyBillingReadback(PROJECT);
+    expect(r.ok).toBe(true);
+    expect((r as { billingAccountId: string }).billingAccountId).toBe('OTHER-ACCOUNT');
   });
 
   it('FAIL when billingEnabled is false (account not open/active)', async () => {
@@ -57,7 +57,7 @@ describe('project-side billing verification (getBillingInfo — no billing-accou
       status: 200,
       body: { projectId: PROJECT, billingAccountName: 'billingAccounts/01B61E-759031-B494E4', billingEnabled: false },
     }));
-    const r = await adapter.verifyBillingIsolation('01B61E-759031-B494E4', PROJECT);
+    const r = await adapter.verifyBillingReadback(PROJECT);
     expect(r.ok).toBe(false);
     expect((r as { reason: string }).reason).toContain('billingEnabled ≠ true');
   });
@@ -67,7 +67,7 @@ describe('project-side billing verification (getBillingInfo — no billing-accou
       status: 200,
       body: { projectId: 'wrong-project', billingAccountName: 'billingAccounts/01B61E-759031-B494E4', billingEnabled: true },
     }));
-    const r = await adapter.verifyBillingIsolation('01B61E-759031-B494E4', PROJECT);
+    const r = await adapter.verifyBillingReadback(PROJECT);
     expect(r.ok).toBe(false);
     expect((r as { reason: string }).reason).toContain('project identity mismatch');
   });
@@ -226,6 +226,6 @@ describe('verifyBootstrapRolesAbsent (authoritative readback)', () => {
   it('cleanup removes projectIamAdmin LAST (revoking policy-read must be the final step)', async () => {
     const roles = [...BOOTSTRAP_ROLES];
     expect(roles[roles.length - 1]).toBe('roles/resourcemanager.projectIamAdmin');
-    expect(roles).toEqual(['roles/iam.serviceAccountAdmin', 'roles/iam.serviceAccountViewer', 'roles/monitoring.viewer', 'roles/viewer', 'roles/resourcemanager.projectIamAdmin']);
+    expect(roles).toEqual(['roles/iam.serviceAccountAdmin', 'roles/iam.serviceAccountViewer', 'roles/monitoring.viewer', 'roles/resourcemanager.projectIamAdmin']);
   });
 });

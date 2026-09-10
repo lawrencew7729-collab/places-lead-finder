@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { runProvisioning } from './executor';
-import { createFakeProviders, lastHandedOffDeviceLockSecrets } from './provisioningProviders';
-import { kvStoreFingerprint } from './deviceLockContract';
-import { aclUsernameFor } from './aclProvisioning';
-import type { GoldenReleaseIdentity } from './releaseRegistry';
+import { runProvisioning } from './executor.js';
+import { createFakeProviders, lastHandedOffDeviceLockSecrets } from './provisioningProviders.js';
+import { kvStoreFingerprint } from './kvStoreFingerprint.js';
+import { aclUsernameFor } from './aclProvisioning.js';
+import type { GoldenReleaseIdentity } from './releaseRegistry.js';
 
 const FP = 'A'.repeat(64);
 const APP_PASS = 'accesscode123456';
@@ -41,8 +41,8 @@ function input(overrides: Record<string, unknown> = {}) {
     websiteRestrictionConfirmed: true,
     realPortalSmokeConfirmed: true,
     centralStoreUrl: STORE_A,
-    billingAccountId: '01B61E-759031-B494E4',
     wif: WIF,
+      bootstrapMember: 'admin@leadfinder.business',
     ...overrides,
   };
 }

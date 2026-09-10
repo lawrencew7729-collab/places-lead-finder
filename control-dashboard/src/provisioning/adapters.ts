@@ -22,10 +22,22 @@
  * required dimension (T1 or an explicitly authorized sandbox) before R1
  * execution. No real provider call is made in this LOCAL batch.
  */
-import { normalizeKvStoreUrl, KV_REST_API_TOKEN_FINGERPRINT_KEY } from './deviceLockContract';
-import { aclTokenFingerprint } from './aclProvisioning';
-import { pacificBillingMonth, pacificBillingMonthStartUtc } from './billingMonth';
-import { principalSetFor, wifAudienceFor, type WifConfig } from './provisioningProviders';
+import { normalizeKvStoreUrl, KV_REST_API_TOKEN_FINGERPRINT_KEY } from './deviceLockContract.js';
+import { aclTokenFingerprint } from './aclProvisioning.js';
+import { pacificBillingMonthStartUtc } from './billingMonth.js';
+import { principalSetFor, wifAudienceFor, type WifConfig } from './provisioningProviders.js';
+/** PostgREST scalar RPC boolean parser — true/false JSON body only.
+ *  Any empty/ambiguous/non-boolean body is treated as FALSE (fail closed):
+ *  there is NO "null means success" contract on the reservation RPCs. */
+async function parseRpcBoolean(res: { json(): Promise<unknown> }): Promise<boolean> {
+  try {
+    const body = await res.json();
+    return body === true;
+  } catch {
+    return false;
+  }
+}
+
 
 export interface Transport {
   (url: string, init?: {
@@ -120,7 +132,7 @@ export interface VercelAdapterOptions {
   transport?: Transport;
 }
 
-export function createVercelAdapter(options: VercelAdapterOptions): import('./provisioningProviders').VercelProvider {
+export function createVercelAdapter(options: VercelAdapterOptions): import('./provisioningProviders.js').VercelProvider {
   const transport = options.transport ?? nodeFetchTransport();
   const auth = (extra: Record<string, string> = {}) => ({ Authorization: `Bearer ${options.token}`, 'Content-Type': 'application/json', ...extra });
   const api = `https://api.vercel.com`;
@@ -143,7 +155,23 @@ export function createVercelAdapter(options: VercelAdapterOptions): import('./pr
           // rootDirectory intentionally OMITTED (empty string caused Vercel 400 invalid_root_directory; repo root is the project root)
         }),
       });
-      if (!res.ok) return { ok: false, reason: `vercel createProject ${res.status}` };
+      if (!res.ok) {
+        // 2026-09-08 (real NEW-DUMMY2 race): the Dashboard bootstrap creates the
+        // project and writes secrets; the immediately-following Workflow search
+        // may not yet see it, so POST create hits 409. BOUNDED reconciliation:
+        // on 409 ONLY, one authoritative re-read for the EXACT expected name.
+        // Reuse ONLY if the exact project now exists — never a broad 409
+        // swallow, never a differently-named project, never a retry loop.
+        if (res.status === 409) {
+          const reconcile = await transport(`${api}/v9/projects?teamId=${encodeURIComponent(options.teamId)}&search=${encodeURIComponent(slug)}`, { headers: auth() });
+          if (reconcile.ok) {
+            const reconcileJson = (await reconcile.json()) as { projects?: Array<{ id: string; name: string }> };
+            const exact = (reconcileJson.projects ?? []).find((p) => p.name === `lf-customer-${slug}`);
+            if (exact) return { ok: true, resourceId: exact.id };
+          }
+        }
+        return { ok: false, reason: `vercel createProject ${res.status}` };
+      }
       const data = (await res.json()) as { id: string };
       return { ok: true, resourceId: data.id };
     },
@@ -163,6 +191,15 @@ export function createVercelAdapter(options: VercelAdapterOptions): import('./pr
       if (!res.ok) return { ok: false, reason: `vercel deployGolden ${res.status}` };
       const data = (await res.json()) as { id: string };
       return { ok: true, resourceId: data.id };
+    },
+
+    async getDeploymentStatus(deploymentId) {
+      const res = await transport(`${api}/v13/deployments/${encodeURIComponent(deploymentId)}?teamId=${encodeURIComponent(options.teamId)}`, {
+        headers: auth(),
+      });
+      if (!res.ok) return { ok: false, reason: `vercel deployment status ${res.status}` };
+      const data = (await res.json()) as { readyState?: string };
+      return { ok: true, resourceId: deploymentId, readyState: data.readyState };
     },
 
     async bindDomain(projectId, hostname) {
@@ -269,7 +306,7 @@ export function createVercelAdapter(options: VercelAdapterOptions): import('./pr
 //   Raw key missing + env missing → OWNER ACTION HOLD (fail-closed).
 // ---------------------------------------------------------------------------
 
-export function createPlacesKeyAdapter(options: VercelAdapterOptions): import('./provisioningProviders').SecretHandoff {
+export function createPlacesKeyAdapter(options: VercelAdapterOptions): import('./provisioningProviders.js').SecretHandoff {
   const transport = options.transport ?? nodeFetchTransport();
   const auth = (extra: Record<string, string> = {}) => ({ Authorization: `Bearer ${options.token}`, 'Content-Type': 'application/json', ...extra });
   const api = `https://api.vercel.com`;
@@ -289,6 +326,23 @@ export function createPlacesKeyAdapter(options: VercelAdapterOptions): import('.
       if (!res.ok) return { ok: false, reason: `placesKey setEnv ${res.status}` };
       return { ok: true, resourceId: projectId };
     },
+
+    async configureAppPass(projectId, rawAppPass) {
+      const read = await readProjectEnv(transport, api, projectId, options.teamId, auth);
+      if (!read.ok) return { ok: false, reason: read.reason };
+      // idempotent — NEVER overwrite an existing APP_PASS; report 'retained'
+      // so callers never present a newly generated code as valid.
+      if (read.env.has('APP_PASS')) return { ok: true, resourceId: projectId, appPassState: 'retained' };
+      if (!rawAppPass) return { ok: false, reason: 'OWNER ACTION REQUIRED: APP_PASS not configured' };
+      if (!/^.{16,}$/.test(rawAppPass)) return { ok: false, reason: 'invalid APP_PASS (min 16 chars)' };
+      const res = await transport(`${api}/v9/projects/${encodeURIComponent(projectId)}/env?teamId=${encodeURIComponent(options.teamId)}`, {
+        method: 'POST',
+        headers: auth(),
+        body: JSON.stringify({ key: 'APP_PASS', value: rawAppPass, target: ['production'], type: 'encrypted' }),
+      });
+      if (!res.ok) return { ok: false, reason: `appPass setEnv ${res.status}` };
+      return { ok: true, resourceId: projectId, appPassState: 'created' };
+    },
   };
 }
 
@@ -303,7 +357,7 @@ export function createPlacesKeyAdapter(options: VercelAdapterOptions): import('.
 //   - verifyDeviceLock: bounded read-only HTTPS probe (/api/device?mode=probe).
 // ---------------------------------------------------------------------------
 
-export function createDeviceLockAdapter(options: VercelAdapterOptions): import('./provisioningProviders').DeviceLockProvider {
+export function createDeviceLockAdapter(options: VercelAdapterOptions): import('./provisioningProviders.js').DeviceLockProvider {
   const transport = options.transport ?? nodeFetchTransport();
   const auth = (extra: Record<string, string> = {}) => ({ Authorization: `Bearer ${options.token}`, 'Content-Type': 'application/json', ...extra });
   const api = `https://api.vercel.com`;
@@ -358,7 +412,14 @@ export function createDeviceLockAdapter(options: VercelAdapterOptions): import('
           [KV_REST_API_TOKEN_FINGERPRINT_KEY, aclTokenFingerprint(secrets.kvRestApiToken), 'plain'],
         );
       }
-      pairs.push(['APP_PASS', secrets.appPass, 'encrypted'], ['CUSTOMER_TENANT_ID', tenantId, 'plain']);
+      // APP_PASS: raw may be absent on the cloud path when the start/bootstrap
+      // API already wrote it to the encrypted env — never overwrite an existing
+      // encrypted value; missing raw + missing env = FAIL CLOSED.
+      if (!secrets.appPass && valueOf('APP_PASS') === null) {
+        return { ok: false, reason: 'OWNER ACTION REQUIRED: APP_PASS not configured (raw absent and env absent)' };
+      }
+      if (secrets.appPass) pairs.push(['APP_PASS', secrets.appPass, 'encrypted']);
+      pairs.push(['CUSTOMER_TENANT_ID', tenantId, 'plain']);
       for (const [key, value, type] of pairs) {
         const existing = read.env.get(key);
         if (existing !== undefined) {
@@ -385,6 +446,7 @@ export function createDeviceLockAdapter(options: VercelAdapterOptions): import('
         storeUrl: valueOf('KV_REST_API_URL') ?? valueOf('UPSTASH_REDIS_REST_URL') ?? undefined,
         tokenPresent: Boolean(valueOf('KV_REST_API_TOKEN') ?? valueOf('UPSTASH_REDIS_REST_TOKEN')),
         tokenFingerprint: valueOf(KV_REST_API_TOKEN_FINGERPRINT_KEY) ?? undefined,
+        appPassPresent: valueOf('APP_PASS') !== null,
       };
     },
 
@@ -426,7 +488,7 @@ export interface ControlPlaneAdapterOptions {
   transport?: Transport;
 }
 
-export function createControlPlaneAdapter(options: ControlPlaneAdapterOptions): import('./provisioningProviders').ControlPlaneProvider {
+export function createControlPlaneAdapter(options: ControlPlaneAdapterOptions): import('./provisioningProviders.js').ControlPlaneProvider {
   const transport = options.transport ?? nodeFetchTransport();
   const headers = { Authorization: `Bearer ${options.serviceRoleKey}`, apikey: options.serviceRoleKey, 'Content-Type': 'application/json', Prefer: 'return=representation' };
   const api = `${options.baseUrl}/rest/v1`;
@@ -524,22 +586,76 @@ export function createControlPlaneAdapter(options: ControlPlaneAdapterOptions): 
       return { ok: true };
     },
 
+    async getLastAudit(tenantId, action) {
+      const res = await transport(`${api}/audit_logs?tenant_id=eq.${encodeURIComponent(tenantId)}&action=eq.${encodeURIComponent(action)}&select=created_at&order=created_at.desc&limit=1`, { headers });
+      if (!res.ok) return { ok: false, reason: `cp getLastAudit ${res.status}` };
+      const rows = (await res.json()) as Array<{ created_at?: string | null }>;
+      if (rows.length === 0) return { ok: true };
+      return { ok: true, at: String(rows[0].created_at ?? '') };
+    },
+
+    async getLastWorkflowStart(tenantId) {
+      const res = await transport(`${api}/audit_logs?tenant_id=eq.${encodeURIComponent(tenantId)}&action=like.WORKFLOW_STARTED_%&select=action,created_at&order=created_at.desc&limit=1`, { headers });
+      if (!res.ok) return { ok: false, reason: `cp getLastWorkflowStart ${res.status}` };
+      const rows = (await res.json()) as Array<{ action?: string; created_at?: string | null }>;
+      const action = String(rows[0]?.action ?? '');
+      if (!action.startsWith('WORKFLOW_STARTED:')) return { ok: true };
+      return { ok: true, runId: action.slice('WORKFLOW_STARTED:'.length), at: String(rows[0]?.created_at ?? '') };
+    },
+
+    async reserveProvisioningStart(tenantId, reservationToken) {
+      const res = await transport(`${api}/rpc/reserve_provisioning_start`, { method: 'POST', headers, body: JSON.stringify({ p_tenant_id: tenantId, p_reservation_token: reservationToken }) });
+      if (!res.ok) return { ok: false, reason: `cp reserveProvisioningStart ${res.status}` };
+      // PostgREST scalar RPC: response body is a JSON boolean (true/false) —
+      // parsed semantically; an empty/ambiguous body is treated as FALSE.
+      const winner = await parseRpcBoolean(res);
+      return { ok: true, winner };
+    },
+    async linkProvisioningRun(tenantId, reservationToken, runId) {
+      const res = await transport(`${api}/rpc/link_provisioning_run`, { method: 'POST', headers, body: JSON.stringify({ p_tenant_id: tenantId, p_reservation_token: reservationToken, p_run_id: runId }) });
+      if (!res.ok) return { ok: false, reason: `cp linkProvisioningRun ${res.status}` };
+      const linked = await parseRpcBoolean(res);
+      return { ok: true, linked };
+    },
+    async releaseProvisioningReservation(tenantId, reservationToken) {
+      const res = await transport(`${api}/rpc/release_provisioning_reservation`, { method: 'POST', headers, body: JSON.stringify({ p_tenant_id: tenantId, p_reservation_token: reservationToken }) });
+      if (!res.ok) return { ok: false, reason: `cp releaseProvisioningReservation ${res.status}` };
+      const released = await parseRpcBoolean(res);
+      return { ok: true, released };
+    },
+    async readProvisioningReservation(tenantId) {
+      const res = await transport(`${api}/tenants?id=eq.${encodeURIComponent(tenantId)}&select=provisioning_reservation_token,provisioning_run_id`, { headers });
+      if (!res.ok) return { ok: false, reason: `cp readProvisioningReservation ${res.status}` };
+      const rows = (await res.json()) as Array<{ provisioning_reservation_token?: string | null; provisioning_run_id?: string | null }>;
+      if (rows.length === 0) return { ok: false, reason: 'tenant not found' };
+      return { ok: true, reservationToken: rows[0].provisioning_reservation_token ?? null, runId: rows[0].provisioning_run_id ?? null };
+    },
+
     async findTenantBySlug(slug) {
-      const res = await transport(`${api}/tenants?slug=eq.${encodeURIComponent(slug)}&select=id,exact_subdomain`, { headers });
+      const res = await transport(`${api}/tenants?slug=eq.${encodeURIComponent(slug)}&select=id,exact_subdomain,status`, { headers });
       if (!res.ok) return { ok: false, reason: `cp findTenantBySlug ${res.status}` };
-      const rows = (await res.json()) as Array<{ id: string; exact_subdomain: string }>;
+      const rows = (await res.json()) as Array<{ id: string; exact_subdomain: string; status?: string | null }>;
       if (rows.length === 0) return { ok: false, reason: 'not found' };
-      // the authoritative tenant identity is the row's UUID — slug/subdomain are attributes
-      return { ok: true, resourceId: rows[0].id, tenantId: rows[0].id };
+      // the authoritative tenant identity is the row's UUID — slug/subdomain are attributes;
+      // status (tenants.status) is the AUTHORITATIVE ACTIVE source (finalize flips it last).
+      return { ok: true, resourceId: rows[0].id, tenantId: rows[0].id, tenantStatus: rows[0].status ?? null };
+    },
+
+    async findTenantById(tenantId) {
+      const res = await transport(`${api}/tenants?id=eq.${encodeURIComponent(tenantId)}&select=id,slug`, { headers });
+      if (!res.ok) return { ok: false, reason: `cp findTenantById ${res.status}` };
+      const rows = (await res.json()) as Array<{ id: string; slug: string }>;
+      if (rows.length === 0) return { ok: false, reason: 'not found' };
+      return { ok: true, resourceId: rows[0].id, tenantId: rows[0].id, slug: rows[0].slug };
     },
 
     async findConfigByTenant(tenantId) {
-      const res = await transport(`${api}/customer_configurations?tenant_id=eq.${tenantId}&select=monthly_usage_target,amber_threshold_percent,red_threshold_percent,quota_enforcement_mode,device_limit,device_lock_mode,device_kv_namespace,device_store_fingerprint,device_app_pass_configured,billing_account_id,billing_activation_month,billing_pre_activation_usage,acl_username,acl_token_fingerprint,monitoring_sa_email`, { headers });
+      const res = await transport(`${api}/customer_configurations?tenant_id=eq.${tenantId}&select=google_project_id,places_key_fingerprint,website_restriction_exact,monthly_usage_target,amber_threshold_percent,red_threshold_percent,quota_enforcement_mode,device_limit,device_lock_mode,device_kv_namespace,device_store_fingerprint,device_app_pass_configured,billing_account_id,billing_activation_month,billing_pre_activation_usage,acl_username,acl_token_fingerprint,monitoring_sa_email`, { headers });
       if (!res.ok) return { ok: false, reason: `cp findConfigByTenant ${res.status}` };
       const rows = (await res.json()) as Array<Record<string, unknown>>;
       if (rows.length === 0) return { ok: false, reason: 'not found' };
       const row = rows[0];
-      const config: import('./provisioningProviders').CustomerConfigInput = {
+      const config: import('./provisioningProviders.js').CustomerConfigInput = {
         tenantId,
         googleProjectId: String(row.google_project_id ?? ''),
         keyFingerprint: String(row.places_key_fingerprint ?? ''),
@@ -586,7 +702,7 @@ export function createControlPlaneAdapter(options: ControlPlaneAdapterOptions): 
       if (rows.length === 0) return { ok: false, reason: 'not found' };
       const row = rows[0];
       const uri = String(row.artifact_uri ?? '');
-      const release: import('./releaseRegistry').GoldenReleaseIdentity = {
+      const release: import('./releaseRegistry.js').GoldenReleaseIdentity = {
         version: String(row.version ?? ''),
         tag: uri.startsWith('tag:') ? uri.slice(4) : uri,
         commitSha: String(row.git_sha ?? ''),
@@ -597,6 +713,42 @@ export function createControlPlaneAdapter(options: ControlPlaneAdapterOptions): 
         approvedAt: row.approved_at ? String(row.approved_at) : undefined,
       };
       return { ok: true, release, resourceId: tag };
+    },
+
+    async listLatestApprovedRelease() {
+      const res = await transport(
+        `${api}/releases?status=eq.approved&order=approved_at.desc.nullslast&limit=1&select=version,status,git_sha,artifact_sha256,artifact_uri,approved_by,approved_at`,
+        { headers },
+      );
+      if (!res.ok) return { ok: false, reason: `cp listLatestApprovedRelease ${res.status}` };
+      const rows = (await res.json()) as Array<Record<string, unknown>>;
+      if (rows.length === 0) return { ok: false, reason: 'no approved release' };
+      const row = rows[0];
+      const uri = String(row.artifact_uri ?? '');
+      const release: import('./releaseRegistry.js').GoldenReleaseIdentity = {
+        version: String(row.version ?? ''),
+        tag: uri.startsWith('tag:') ? uri.slice(4) : uri,
+        commitSha: String(row.git_sha ?? ''),
+        artifactSha256: String(row.artifact_sha256 ?? ''),
+        sourcePath: '',
+        status: 'approved',
+        approvedBy: row.approved_by ? String(row.approved_by) : undefined,
+        approvedAt: row.approved_at ? String(row.approved_at) : undefined,
+      };
+      return { ok: true, resourceId: release.tag, release };
+    },
+
+    async getOperatorProfile(userId) {
+      const res = await transport(`${api}/operator_profiles?user_id=eq.${encodeURIComponent(userId)}&select=user_id,role,active`, { headers });
+      if (!res.ok) return { ok: false, reason: `cp getOperatorProfile ${res.status}` };
+      const rows = (await res.json()) as Array<{ user_id?: string; role?: string; active?: boolean }>;
+      if (rows.length === 0) return { ok: false, reason: 'not found' };
+      const row = rows[0];
+      return {
+        ok: true,
+        resourceId: userId,
+        profile: { userId: String(row.user_id ?? userId), role: String(row.role ?? ''), active: row.active === true },
+      };
     },
   };
 }
@@ -611,29 +763,50 @@ export interface GoogleAdapterOptions {
   transport?: Transport;
 }
 
-export function createGoogleAdapter(options: GoogleAdapterOptions): import('./provisioningProviders').GoogleProvider {
+export function createGoogleAdapter(options: GoogleAdapterOptions): import('./provisioningProviders.js').GoogleProvider {
   const transport = options.transport ?? nodeFetchTransport();
   const bearer = async (extra: Record<string, string> = {}) => ({ Authorization: `Bearer ${await options.accessTokenProvider()}`, 'Content-Type': 'application/json', ...extra });
 
-  /** Idempotent IAM role grant: read policy, add the exact member if missing, write, read back. */
+  /**
+   * Idempotent IAM role grant — VERSION-3 CONDITION-SAFE (ChatGPT review
+   * FINDING B, 2026-09-06): requests policy version 3, preserves every
+   * binding byte-for-byte (including conditional bindings like the expiring
+   * "Lead Finder Bootstrap" temporary grant), and NEVER appends the customer
+   * monitoring SA into a CONDITIONAL binding. The customer SA needs a
+   * persistent UNCONDITIONAL binding for the role.
+   *
+   * Logic:
+   *  - member already in an UNCONDITIONAL binding for the role → idempotent PASS
+   *  - otherwise append to the role's UNCONDITIONAL binding, or add a NEW
+   *    unconditional binding (conditional bindings for the same role are
+   *    preserved untouched — two logically distinct bindings may coexist)
+   *  - setIamPolicy writes back version + etag + all bindings incl. conditions
+   */
   async function grantIamRole(googleProjectId: string, role: string, member: string): Promise<{ ok: true; resourceId: string } | { ok: false; reason: string }> {
     const getRes = await transport(`https://cloudresourcemanager.googleapis.com/v1/projects/${encodeURIComponent(googleProjectId)}:getIamPolicy`, {
       method: 'POST',
       headers: await bearer(),
-      body: JSON.stringify({}),
+      body: JSON.stringify({ options: { requestedPolicyVersion: 3 } }),
     });
     if (!getRes.ok) return { ok: false, reason: `google getIamPolicy ${getRes.status}` };
-    const policy = (await getRes.json()) as { bindings?: Array<{ role: string; members: string[] }>; etag?: string };
+    const policy = (await getRes.json()) as {
+      bindings?: Array<{ role: string; members: string[]; condition?: unknown }>;
+      etag?: string;
+      version?: number;
+    };
     const bindings = policy.bindings ?? [];
-    const found = bindings.find((b) => b.role === role);
-    if (found && found.members.includes(member)) return { ok: true, resourceId: googleProjectId }; // already granted — idempotent
-    const nextBindings = found
-      ? bindings.map((b) => (b === found ? { ...b, members: [...b.members, member] } : b))
+    // unconditional binding for this role that already carries the member
+    const unconditionalRole = bindings.find((b) => b.role === role && !b.condition);
+    if (unconditionalRole && memberPresent(unconditionalRole.members, member)) {
+      return { ok: true, resourceId: googleProjectId }; // already granted — idempotent
+    }
+    const nextBindings = unconditionalRole
+      ? bindings.map((b) => (b === unconditionalRole ? { ...b, members: memberIn(b.members, member) ? b.members : [...b.members, member] } : b))
       : [...bindings, { role, members: [member] }];
     const setRes = await transport(`https://cloudresourcemanager.googleapis.com/v1/projects/${encodeURIComponent(googleProjectId)}:setIamPolicy`, {
       method: 'POST',
       headers: await bearer(),
-      body: JSON.stringify({ policy: { bindings: nextBindings, etag: policy.etag } }),
+      body: JSON.stringify({ policy: { version: policy.version ?? 3, etag: policy.etag, bindings: nextBindings } }),
     });
     if (!setRes.ok) return { ok: false, reason: `google setIamPolicy ${setRes.status}` };
     return { ok: true, resourceId: googleProjectId };
@@ -735,13 +908,25 @@ export function createGoogleAdapter(options: GoogleAdapterOptions): import('./pr
     },
 
     // A3b: USER_MANAGED SA keys MUST be 0 (SYSTEM_MANAGED only) — no JSON/private keys.
+    // 2026-09-09 (DUMMY3/DUMMY4): a JUST-created SA can briefly 404 in IAM
+    // (propagation lag). Bounded retry on HTTP 404 ONLY: wait 1.5s → 3s → 5s
+    // (4 attempts total, ~9.5s max). 400/401/403/5xx fail immediately; after
+    // the final 404 the stage FAIL CLOSES exactly as before. Never recreates
+    // the SA, never weakens the USER_MANAGED=0 policy.
     async verifyUserManagedKeys(saEmail) {
-      const res = await transport(`https://iam.googleapis.com/v1/projects/-/serviceAccounts/${encodeURIComponent(saEmail)}/keys`, { headers: await bearer() });
-      if (!res.ok) return { ok: false, reason: `wif listSaKeys ${res.status}` };
-      const body = (await res.json()) as { keys?: Array<{ keyType?: string }> };
-      const userManaged = (body.keys ?? []).filter((k) => k.keyType === 'USER_MANAGED').length;
-      if (userManaged !== 0) return { ok: false, reason: `USER_MANAGED SA keys must be 0 (got ${userManaged})` };
-      return { ok: true, resourceId: saEmail, userManagedCount: 0 };
+      const url = `https://iam.googleapis.com/v1/projects/-/serviceAccounts/${encodeURIComponent(saEmail)}/keys`;
+      const waits = [1500, 3000, 5000];
+      for (let attempt = 0; ; attempt += 1) {
+        const res = await transport(url, { headers: await bearer() });
+        if (res.ok) {
+          const body = (await res.json()) as { keys?: Array<{ keyType?: string }> };
+          const userManaged = (body.keys ?? []).filter((k) => k.keyType === 'USER_MANAGED').length;
+          if (userManaged !== 0) return { ok: false, reason: `USER_MANAGED SA keys must be 0 (got ${userManaged})` };
+          return { ok: true, resourceId: saEmail, userManagedCount: 0 };
+        }
+        if (res.status !== 404 || attempt >= waits.length) return { ok: false, reason: `wif listSaKeys ${res.status}` };
+        await new Promise((resolve) => setTimeout(resolve, waits[attempt]));
+      }
     },
 
     // A3b: exact per-project principalSet binding on THAT customer's SA (idempotent + readback).
@@ -767,21 +952,19 @@ export function createGoogleAdapter(options: GoogleAdapterOptions): import('./pr
       return { ok: true, resourceId: member };
     },
 
-    // A3b readback: provider exact template + customer SA (own project) + keys=0 +
-    // exact binding on that SA + roles on the customer project ONLY.
+    // A3b readback — PER-CUSTOMER ONLY (ChatGPT review FINDING A, 2026-09-06):
+    // the central shared pool/provider is ONE-TIME infrastructure whose health
+    // is proven fail-closed by the operator STS exchange itself. This function
+    // performs ZERO requests to the central workloadIdentityPools/provider.
+    // Verified invariants (all customer-scoped):
+    //  - customer SA belongs to the exact customer Google project
+    //  - USER_MANAGED keys = 0
+    //  - exact workloadIdentityUser principalSet binding on the customer SA
+    //  - UNCONDITIONAL monitoring.viewer binding on the customer project
+    //  - UNCONDITIONAL serviceusage.serviceUsageConsumer binding on the customer
+    //    project (an expiring conditional "Lead Finder Bootstrap" binding is
+    //    NOT proof of the customer SA's permanent runtime access)
     async verifyWifOnboarding(projectId, wif, customerMonitoringSa, googleProjectId) {
-      const wifApi = `https://iam.googleapis.com/v1/projects/${encodeURIComponent(wif.centralProjectNumber)}/locations/global/workloadIdentityPools`;
-      const providerUrl = `${wifApi}/${encodeURIComponent(wif.pool)}/providers/${encodeURIComponent(wif.provider)}`;
-      const desired = providerTemplate(wif);
-
-      const poolRes = await transport(`${wifApi}/${encodeURIComponent(wif.pool)}`, { headers: await bearer() });
-      if (!poolRes.ok) return { ok: false, reason: `wif readback pool ${poolRes.status}` };
-      const providerRes = await transport(providerUrl, { headers: await bearer() });
-      if (!providerRes.ok) return { ok: false, reason: `wif readback provider ${providerRes.status}` };
-      const provider = (await providerRes.json()) as Record<string, unknown>;
-      const drift = providerDrift(provider, desired);
-      if (drift) return { ok: false, reason: `WIF provider readback drift: ${drift}` };
-
       // SA ownership: the SA email domain MUST equal the customer project id.
       if (!customerMonitoringSa.endsWith(`@${googleProjectId}.iam.gserviceaccount.com`)) {
         return { ok: false, reason: 'customer monitoring SA not owned by the customer project' };
@@ -797,20 +980,26 @@ export function createGoogleAdapter(options: GoogleAdapterOptions): import('./pr
       const hasBinding = (policy.bindings ?? []).some((b) => b.role === 'roles/iam.workloadIdentityUser' && b.members.includes(member));
       if (!hasBinding) return { ok: false, reason: 'WIF readback: workloadIdentityUser binding missing on the customer SA' };
 
-      // roles on the CUSTOMER project ONLY (never any other project)
+      // roles on the CUSTOMER project ONLY (never any other project) — version-3
+      // policy read so conditional bindings are visible and NOT accepted as the
+      // customer SA's permanent access.
       const iamRes = await transport(`https://cloudresourcemanager.googleapis.com/v1/projects/${encodeURIComponent(googleProjectId)}:getIamPolicy`, {
         method: 'POST',
         headers: await bearer(),
-        body: JSON.stringify({}),
+        body: JSON.stringify({ options: { requestedPolicyVersion: 3 } }),
       });
       if (!iamRes.ok) return { ok: false, reason: `wif readback projectIam ${iamRes.status}` };
-      const iamPolicy = (await iamRes.json()) as { bindings?: Array<{ role: string; members: string[] }> };
-      const roleMembers = (role: string) => (iamPolicy.bindings ?? []).find((b) => b.role === role)?.members ?? [];
-      if (!roleMembers('roles/monitoring.viewer').includes(`serviceAccount:${customerMonitoringSa}`)) {
-        return { ok: false, reason: 'WIF readback: monitoring.viewer missing on the customer project' };
+      const iamPolicy = (await iamRes.json()) as {
+        bindings?: Array<{ role: string; members: string[]; condition?: unknown }>;
+      };
+      const saMember = `serviceAccount:${customerMonitoringSa}`;
+      const hasUnconditional = (role: string) =>
+        (iamPolicy.bindings ?? []).some((b) => b.role === role && !b.condition && memberPresent(b.members, saMember));
+      if (!hasUnconditional('roles/monitoring.viewer')) {
+        return { ok: false, reason: 'WIF readback: unconditional monitoring.viewer missing on the customer project' };
       }
-      if (!roleMembers('roles/serviceusage.serviceUsageConsumer').includes(`serviceAccount:${customerMonitoringSa}`)) {
-        return { ok: false, reason: 'WIF readback: serviceusage.serviceUsageConsumer missing on the customer project' };
+      if (!hasUnconditional('roles/serviceusage.serviceUsageConsumer')) {
+        return { ok: false, reason: 'WIF readback: unconditional serviceusage.serviceUsageConsumer missing on the customer project' };
       }
       return { ok: true, resourceId: customerMonitoringSa };
     },
@@ -839,22 +1028,31 @@ export function createGoogleAdapter(options: GoogleAdapterOptions): import('./pr
     },
 
     // Project-side billing evidence (OWNER-APPROVED 2026-08-31): NO billing-account
-    // IAM grant. Uses projects.getBillingInfo (permission: billing.resourceAssociations.list
-    // at PROJECT scope): project identity + linked billing account + billingEnabled=true.
+    // IAM grant. Uses projects.getBillingInfo — the required project permission is
+    // resourcemanager.projects.get, already supplied by roles/resourcemanager.
+    // projectIamAdmin in the current bootstrap model. (billing.resourceAssociations.
+    // list is a billing-ACCOUNT-level permission for listing account projects — NOT
+    // required here; no billing.viewer / billing-account IAM is needed.)
+    // Readback contract: project identity + linked billing account + billingEnabled=true.
     // The dedicated-account "exactly one linked project" rule is a HUMAN CHECKPOINT
     // (operator confirms face-to-face) — never automated via billing-account IAM.
-    async verifyBillingIsolation(billingAccountId, googleProjectId) {
+    async verifyBillingReadback(googleProjectId) {
+      // Project-side authoritative readback — the customer's own linked billing
+      // (staff links project → billing in the customer's Google account). No
+      // expected value, no billing-account IAM, no manual input.
       const res = await transport(`https://cloudbilling.googleapis.com/v1/projects/${encodeURIComponent(googleProjectId)}/billingInfo`, {
         headers: await bearer(),
       });
       if (!res.ok) return { ok: false, reason: `billing getBillingInfo ${res.status}` };
       const body = (await res.json()) as { projectId?: string; billingAccountName?: string; billingEnabled?: boolean };
       if (body.projectId !== googleProjectId) return { ok: false, reason: `billing project identity mismatch (${body.projectId ?? 'none'})` };
-      if (body.billingAccountName !== `billingAccounts/${billingAccountId}`) {
-        return { ok: false, reason: `billing account mismatch (${body.billingAccountName ?? 'none'} ≠ billingAccounts/${billingAccountId})` };
-      }
       if (body.billingEnabled !== true) return { ok: false, reason: 'billingEnabled ≠ true (account not open/active)' };
-      return { ok: true, resourceId: billingAccountId };
+      const accountName = body.billingAccountName ?? '';
+      if (!accountName.startsWith('billingAccounts/')) {
+        return { ok: false, reason: 'no linked billing account on the project (staff must link the customer billing in the Google console)' };
+      }
+      const billingAccountId = accountName.slice('billingAccounts/'.length);
+      return { ok: true, resourceId: billingAccountId, billingAccountId };
     },
 
     // Bootstrap cleanup: remove ONLY the exact (role, member) binding on the customer
@@ -1002,7 +1200,7 @@ export interface UpstashRedisAclAdminOptions {
   transport?: Transport;
 }
 
-export function createUpstashRedisAclAdmin(options: UpstashRedisAclAdminOptions): import('./aclProvisioning').RedisAclAdmin {
+export function createUpstashRedisAclAdmin(options: UpstashRedisAclAdminOptions): import('./aclProvisioning.js').RedisAclAdmin {
   const transport = options.transport ?? nodeFetchTransport();
 
   async function command(commandLine: string): Promise<unknown> {
@@ -1048,7 +1246,7 @@ export function createUpstashRedisAclAdmin(options: UpstashRedisAclAdminOptions)
 // HEALTH adapter — bounded HTTPS smoke check (HTML)
 // ---------------------------------------------------------------------------
 
-export function createHealthAdapter(options: { transport?: Transport } = {}): import('./provisioningProviders').HealthProvider {
+export function createHealthAdapter(options: { transport?: Transport } = {}): import('./provisioningProviders.js').HealthProvider {
   const transport = options.transport ?? nodeFetchTransport();
   return {
     async smokeCheck(hostname) {
@@ -1071,7 +1269,7 @@ export function createHealthAdapter(options: { transport?: Transport } = {}): im
 // Any failure = fail-closed provisioning HOLD.
 // ---------------------------------------------------------------------------
 
-export function createUsageSmokeAdapter(options: { transport?: Transport } = {}): import('./provisioningProviders').UsageSmokeProvider {
+export function createUsageSmokeAdapter(options: { transport?: Transport } = {}): import('./provisioningProviders.js').UsageSmokeProvider {
   const transport = options.transport ?? nodeFetchTransport();
 
   async function getJson(url: string): Promise<{ status: number; body: Record<string, unknown> }> {
@@ -1081,17 +1279,20 @@ export function createUsageSmokeAdapter(options: { transport?: Transport } = {})
   }
 
   return {
-    // OWNER CORRECTION 2026-08-27: point 11 is the SERVER-SIDE
+    // OWNER-APPROVED CONTRACT (2026-09-06): point 11 is the SERVER-SIDE
     // REFERRER-ACCEPTANCE PREFLIGHT — ONE bounded real Places request from the
     // exact origin using the customer's OWN key (transient handoff), carrying
-    // Referer `https://<host>/` — a browser-like exact customer origin (the
-    // literal `/*` is the Google restriction PATTERN, not a browser Referer)
-    // requests). It proves the referrer restriction ADMITS the exact origin;
-    // it does NOT prove the Customer Portal browser runtime works. The FINAL
-    // real Customer Portal smoke is a separate OPERATOR-ASSISTED browser
-    // checkpoint in the executor (realPortalSmokeConfirmed). Fail-closed:
-    //   - no key (probe before key capture/runtime handoff) → FAIL
-    //   - referrer denied (incompatible/mismatched restriction behavior) → FAIL
+    // Referer `https://<host>/` (browser-like exact customer origin; the `/*`
+    // is the Google restriction PATTERN, not a browser Referer). It reports
+    // whether the referrer restriction ADMITS the exact origin; it does NOT
+    // prove the Customer Portal browser runtime works (the FINAL real portal
+    // smoke is the separate OPERATOR-ASSISTED browser checkpoint,
+    // realPortalSmokeConfirmed). The probe is a REPORTED SIGNAL — the adapter
+    // never fails the whole usage smoke for this probe alone; the EXECUTOR
+    // owns the fail-closed policy:
+    //   - raw key PRESENT + probe false → executor FAILS CLOSED (CLI/dev)
+    //   - raw key ABSENT (cloud, after transient handoff) → executor does NOT
+    //     fail for this probe; proceeds to the real portal-smoke hold
     // The raw key is used in-memory ONLY and never enters the report or logs.
     async run(hostname, placesApiKey) {
       const base = `https://${hostname}`;
@@ -1136,19 +1337,22 @@ export function createUsageSmokeAdapter(options: { transport?: Transport } = {})
       // wildcard belongs to the Google restriction pattern, not the header).
       // A 2xx proves the referrer restriction admits the
       // exact origin with THIS key; REQUEST_DENIED (incompatible, mismatched or
-      // denied referrer-restriction behavior) fails closed. It does NOT
+      // denied referrer-restriction behavior) reports probe=false. This does NOT
       // independently prove that a Website Restriction exists at all — an
       // unrestricted key may also accept the request (existence/exact
       // configuration are covered by the stage-9 face-to-face confirmation
-      // gate). Absent key ⇒ fail-closed (cannot run
-      // before the real API key capture/runtime handoff). This is NOT a proof
+      // gate). Absent key ⇒ probe=false (probe cannot run before the real API
+      // key capture/runtime handoff) — the ADAPTER reports it; the executor
+      // owns fail-closed policy (key present + probe false → fail; key absent
+      // on the cloud path → real portal-smoke hold). This is NOT a proof
       // of the Customer Portal browser runtime — the FINAL real portal smoke is
       // the operator-assisted browser checkpoint (realPortalSmokeConfirmed).
       // Place Details (New) is the smallest Places surface (~$0.017/1000 — ONE
       // request).
       let referrerAcceptanceProbe = false;
       if (typeof placesApiKey !== 'string' || placesApiKey.length === 0) {
-        // no key — report carries the failure; caller records the reason
+        // no key — probe stays false and is REPORTED as such; the executor
+        // decides (cloud path must not fail for this reason)
       } else {
         const places = await transport(
           `https://places.googleapis.com/v1/places/ChIJj61dQgK6j4AR4GeTYWZsKWw?fields=id&key=${encodeURIComponent(placesApiKey)}`,
@@ -1172,14 +1376,19 @@ export function createUsageSmokeAdapter(options: { transport?: Transport } = {})
         noActiveLeaseAfterRelease: noResidualLease && releasedOk,
         referrerAcceptanceProbe,
       };
-      const failed = Object.entries(smoke).filter(([, v]) => !v).map(([k]) => k);
+      // OWNER-APPROVED CLOUD SEMANTICS (2026-09-06): the referrer-acceptance
+      // preflight is REPORTED but never makes the whole run fail. On the cloud
+      // path the raw key is never available after the transient handoff, so a
+      // missing key must not block the pipeline here — the executor decides:
+      //   - raw key present + probe false → fail closed (CLI/dev protection)
+      //   - raw key absent → skip preflight → OWNER ACTION real-portal-smoke
+      //     hold (cloud path → WAITING_SMOKE → resume on staff CONFIRM)
+      const failed = Object.entries(smoke)
+        .filter(([, v]) => !v)
+        .map(([k]) => k)
+        .filter((k) => k !== 'referrerAcceptanceProbe');
       if (failed.length > 0) {
-        const probeReason = !referrerAcceptanceProbe
-          ? (typeof placesApiKey !== 'string' || placesApiKey.length === 0
-            ? 'referrer-acceptance preflight FAILED: real customer API key missing from the transient handoff (preflight cannot run before key capture/runtime handoff)'
-            : 'referrer-acceptance preflight FAILED: referrer restriction denied the exact origin with the customer key (restriction missing or mismatched)')
-          : '';
-        return { ok: false, reason: `usage smoke failed: ${failed.join(', ')}${probeReason ? ` — ${probeReason}` : ''}` };
+        return { ok: false, reason: `usage smoke failed: ${failed.join(', ')}` };
       }
       return { ok: true, resourceId: hostname, smoke };
     },

@@ -27,8 +27,11 @@
  * consumed via the ephemeral provisioning handoff and remain server-side
  * ONLY — never in Control Plane DB, audit logs, Run Sheet, review packages,
  * browser-readable config, or Git.
+ *
+ * Browser-safety: this module is imported by client code (accessCode.ts) and
+ * therefore MUST NOT import node builtins — kvStoreFingerprint() lives in
+ * ./kvStoreFingerprint.ts (server-only) for exactly that reason.
  */
-import { createHash } from 'node:crypto';
 
 export const DEVICE_LOCK_CONTRACT = Object.freeze({
   maxDevices: 2,
@@ -67,7 +70,13 @@ export const KV_REST_API_TOKEN_FINGERPRINT_KEY = 'KV_REST_API_TOKEN_FINGERPRINT'
 export interface DeviceLockSecretsInput {
   kvRestApiUrl: string;   // dedicated store REST URL (per customer)
   kvRestApiToken: string; // dedicated store REST token (per customer)
-  appPass: string;        // 16-char customer access code
+  /**
+   * 16-char customer access code. OPTIONAL in the cloud path (Phase 2C): the
+   * start/bootstrap API may already have written APP_PASS to the customer's
+   * encrypted env before the Workflow run — configureDeviceLock then skips the
+   * write. CLI/dev path always supplies the raw value.
+   */
+  appPass?: string;
 }
 
 /** Readiness probe returned by the deployed customer app (/api/device?mode=probe). */
@@ -121,11 +130,6 @@ export function devicePolicyFor(tenantId: string, storeFingerprint: string): Dev
  */
 export function normalizeKvStoreUrl(rawUrl: string): string {
   return rawUrl.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/+$/, '');
-}
-
-/** FULL 64-hex uppercase SHA-256 of the normalized dedicated store URL. */
-export function kvStoreFingerprint(kvRestApiUrl: string): string {
-  return createHash('sha256').update(normalizeKvStoreUrl(kvRestApiUrl)).digest('hex').toUpperCase();
 }
 
 /** Fail-closed: persisted policy must match the contract EXACTLY (max === 2). */

@@ -1,9 +1,9 @@
 import { describe, expect, it, beforeEach } from 'vitest';
-import { runProvisioning } from './executor';
-import { createFakeProviders, lastHandedOffPlacesKey } from './provisioningProviders';
-import { createVercelAdapter, createControlPlaneAdapter, createGoogleAdapter, createHealthAdapter, createDeviceLockAdapter, createPlacesKeyAdapter, createUpstashRedisAclAdmin, createUsageSmokeAdapter, createFakeTransport } from './adapters';
-import { runtimeEnvPairs, verifyRuntimeEnvConsistency } from './quotaContract';
-import type { GoldenReleaseIdentity } from './releaseRegistry';
+import { runProvisioning } from './executor.js';
+import { createFakeProviders, lastHandedOffPlacesKey } from './provisioningProviders.js';
+import { createVercelAdapter, createControlPlaneAdapter, createGoogleAdapter, createHealthAdapter, createDeviceLockAdapter, createPlacesKeyAdapter, createUpstashRedisAclAdmin, createUsageSmokeAdapter, createFakeTransport } from './adapters.js';
+import { runtimeEnvPairs, verifyRuntimeEnvConsistency } from './quotaContract.js';
+import type { GoldenReleaseIdentity } from './releaseRegistry.js';
 
 const FP = 'A'.repeat(64);
 const RAW_KEY = 'AIzaSyBR_pqYgLQ8qVvz1O3cB4Wx7yZ123456789abcdefg';
@@ -36,7 +36,7 @@ function input() {
     websiteRestrictionConfirmed: true,
     realPortalSmokeConfirmed: true,
     centralStoreUrl: 'https://central.example.com',
-    billingAccountId: '01B61E-759031-B494E4',
+    bootstrapMember: 'admin@leadfinder.business',
     wif: {
       pool: 'lf-vercel-wif',
       provider: 'vercel-oidc',
@@ -523,7 +523,7 @@ describe('R1 final closure — real server-side adapters', () => {
     expect(JSON.stringify(res.smoke)).not.toContain('AIzaSy');
   });
 
-  it('Usage smoke adapter fails closed WITHOUT the real key (preflight before key capture/runtime handoff)', async () => {
+  it('Usage smoke adapter without the real key reports probe=false but does NOT fail the run (OWNER-approved cloud semantics 2026-09-06 — executor decides key-present fail-closed vs key-absent cloud skip)', async () => {
     const { transport } = createFakeTransport([
       { urlPrefix: 'https://abc.leadfinder.business/', body: '<!DOCTYPE html><html>' },
       { urlPrefix: '/api/usage', body: { used: 0, cap: 1000, safetyStop: 900, month: '2026-08', sessionId: 'sess-1', maxSessionRequests: 50, source: 'monitoring' } },
@@ -534,12 +534,14 @@ describe('R1 final closure — real server-side adapters', () => {
     ]);
     const adapter = createUsageSmokeAdapter({ transport });
     const res = await adapter.run('abc.leadfinder.business');
-    expect(res.ok).toBe(false);
-    if (res.ok) throw new Error('expected smoke failure');
-    expect((res as { reason: string }).reason).toContain('real customer API key missing');
+    expect(res.ok).toBe(true);
+    if (!res.ok || !res.smoke) throw new Error('expected success without raw key');
+    expect(res.smoke.referrerAcceptanceProbe).toBe(false); // reported, not fatal
+    expect(res.smoke.domainHealthy).toBe(true);
+    expect(res.smoke.deviceProbeLocked).toBe(true);
   });
 
-  it('Usage smoke adapter fails closed when the referrer restriction denies the exact origin (REQUEST_DENIED)', async () => {
+  it('Usage smoke adapter reports referrerAcceptanceProbe=false when exact-origin probe is denied; executor owns fail-closed policy', async () => {
     const { transport } = createFakeTransport([
       { urlPrefix: 'https://abc.leadfinder.business/', body: '<!DOCTYPE html><html>' },
       { urlPrefix: '/api/usage', body: { used: 0, cap: 1000, safetyStop: 900, month: '2026-08', sessionId: 'sess-1', maxSessionRequests: 50, source: 'monitoring' } },
@@ -550,10 +552,12 @@ describe('R1 final closure — real server-side adapters', () => {
       { urlPrefix: 'https://places.googleapis.com/v1/places/', status: 403, body: { error: { status: 'PERMISSION_DENIED' } } },
     ]);
     const adapter = createUsageSmokeAdapter({ transport });
-    const res = await adapter.run('abc.leadfinder.business', 'AIzaSyA_TEST_KEY_0000000000000000000000');
-    expect(res.ok).toBe(false);
-    if (res.ok) throw new Error('expected smoke failure');
-    expect((res as { reason: string }).reason).toContain('referrer restriction denied');
+    const res = await adapter.run('abc.leadfinder.business', 'AIzaSy...0000');
+    // OWNER-approved 2026-09-06: adapter REPORTS probe=false; the fail-closed
+    // decision for key-present-but-denied lives in the executor.
+    expect(res.ok).toBe(true);
+    if (!res.ok || !res.smoke) throw new Error('expected success (probe reported, executor decides)');
+    expect(res.smoke.referrerAcceptanceProbe).toBe(false);
   });
 
   it('Usage smoke adapter fails closed when /api/usage is blocked or locked', async () => {
@@ -571,15 +575,18 @@ describe('R1 final closure — real server-side adapters', () => {
   it('Google adapter billing isolation: project-side getBillingInfo — identity + account + billingEnabled (owner-approved 2026-08-31; exactly-one = human checkpoint)', async () => {
     const { transport } = createFakeTransport([{ urlPrefix: '/projects/abc-leadfinder-1234/billingInfo', body: { projectId: 'abc-leadfinder-1234', billingAccountName: 'billingAccounts/01B61E-759031-B494E4', billingEnabled: true } }]);
     const adapter = createGoogleAdapter({ accessTokenProvider: async () => 'tok', transport });
-    const ok = await adapter.verifyBillingIsolation('01B61E-759031-B494E4', 'abc-leadfinder-1234');
+    const ok = await adapter.verifyBillingReadback('abc-leadfinder-1234');
     expect(ok.ok).toBe(true);
+    // S2e contract: ANY linked account is valid evidence (no expected value) —
+    // the readback returns the linked account id.
     const { transport: t2 } = createFakeTransport([{ urlPrefix: '/projects/abc-leadfinder-1234/billingInfo', body: { projectId: 'abc-leadfinder-1234', billingAccountName: 'billingAccounts/OTHER-999999', billingEnabled: true } }]);
     const adapter2 = createGoogleAdapter({ accessTokenProvider: async () => 'tok', transport: t2 });
-    const fail = await adapter2.verifyBillingIsolation('01B61E-759031-B494E4', 'abc-leadfinder-1234');
-    expect(fail.ok).toBe(false);
+    const linked = await adapter2.verifyBillingReadback('abc-leadfinder-1234');
+    expect(linked.ok).toBe(true);
+    expect((linked as { billingAccountId?: string }).billingAccountId).toBe('OTHER-999999');
     const { transport: t3 } = createFakeTransport([{ urlPrefix: '/projects/abc-leadfinder-1234/billingInfo', body: { projectId: 'abc-leadfinder-1234', billingAccountName: 'billingAccounts/01B61E-759031-B494E4', billingEnabled: false } }]);
     const adapter3 = createGoogleAdapter({ accessTokenProvider: async () => 'tok', transport: t3 });
-    const closed = await adapter3.verifyBillingIsolation('01B61E-759031-B494E4', 'abc-leadfinder-1234');
+    const closed = await adapter3.verifyBillingReadback('abc-leadfinder-1234');
     expect(closed.ok).toBe(false);
   });
 

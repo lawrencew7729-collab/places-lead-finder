@@ -19,8 +19,8 @@
  *     only — no write, no payment data).
  */
 import { describe, expect, it } from 'vitest';
-import { createGoogleAdapter, createFakeTransport } from './adapters';
-import { OPERATOR_ENV_KEYS } from './operatorCli';
+import { createGoogleAdapter, createFakeTransport } from './adapters.js';
+import { OPERATOR_ENV_KEYS } from './operatorCli.js';
 
 describe('OWNER DECISION 2 — no customer Google account admin access', () => {
   it('google adapter grants ONLY monitoring.viewer + serviceUsageConsumer (never owner/editor/iam.admin/billing admin)', async () => {
@@ -49,12 +49,12 @@ describe('OWNER DECISION 2 — no customer Google account admin access', () => {
     }
   });
 
-  it('billing interaction is READ-ONLY: verifyBillingIsolation issues only GET (projects.getBillingInfo), never writes or touches payment data', async () => {
+  it('billing interaction is READ-ONLY: verifyBillingReadback issues only GET (projects.getBillingInfo), never writes or touches payment data', async () => {
     const { transport, calls } = createFakeTransport([
       { urlPrefix: '/projects/customer-a-google-123/billingInfo', body: { projectId: 'customer-a-google-123', billingAccountName: 'billingAccounts/01B61E-759031-B494E4', billingEnabled: true } },
     ]);
     const adapter = createGoogleAdapter({ accessTokenProvider: async () => 'tok', transport });
-    const res = await adapter.verifyBillingIsolation('01B61E-759031-B494E4', 'customer-a-google-123');
+    const res = await adapter.verifyBillingReadback('customer-a-google-123');
     expect(res.ok).toBe(true);
     expect(calls).toHaveLength(1);
     expect(calls[0].method).toBe('GET');
@@ -76,9 +76,9 @@ describe('OWNER DECISION 2 — no customer Google account admin access', () => {
     // CustomerConfigInput carries only: project id, key fingerprint, restriction,
     // quota, device policy metadata, billing account id (non-secret evidence),
     // ACL identity metadata, monitoring SA email. Nothing else.
-    const { createFakeProviders } = await import('./provisioningProviders');
+    const { createFakeProviders } = await import('./provisioningProviders.js');
     const providers = createFakeProviders();
-    const { runProvisioning } = await import('./executor');
+    const { runProvisioning } = await import('./executor.js');
     const golden = {
       version: '1.0.1',
       tag: 'customer-app-v1.0.1',
@@ -92,7 +92,7 @@ describe('OWNER DECISION 2 — no customer Google account admin access', () => {
       companyName: 'ABC', slug: 'abc', googleProjectId: 'abc-leadfinder-1234',
       placesKeyFingerprint: 'A'.repeat(64), goldenRelease: golden, executionGate: true,
       centralStore: true, centralStoreUrl: 'https://central.example.com',
-      billingAccountId: '01B61E-759031-B494E4', websiteRestrictionConfirmed: true, realPortalSmokeConfirmed: true,
+    bootstrapMember: 'admin@leadfinder.business', websiteRestrictionConfirmed: true, realPortalSmokeConfirmed: true,
       wif: { pool: 'lf-vercel-wif', provider: 'vercel-oidc', centralProjectNumber: '123456789012', vercelTeamSlug: 'lawrencew7729-4682s', vercelTeamId: 'team_lawrencew7729' },
     }, { placesApiKey: 'AIzaSyA_TEST_KEY_0000000000000000000000', deviceLockSecrets: { appPass: 'accesscode123456' } });
     expect(result.outcome).toBe('CUSTOMER_READY');

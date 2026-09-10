@@ -27,27 +27,27 @@
  *  - functional usage smoke (10-point) before CUSTOMER READY
  *  - billing-account isolation + zero pre-activation usage before finalize
  */
-import { verifyGoldenRelease, type GoldenReleaseIdentity } from './releaseRegistry';
-import { explicitProvisioningQuota, runtimeEnvPairs, verifyQuotaConsistency, verifyRuntimeEnvConsistency, REQUIRED_RUNTIME_ENV_KEYS, type RuntimeQuotaConfig } from './quotaContract';
+import { BOOTSTRAP_ROLES, BOOTSTRAP_ADMIN_ROLE } from './bootstrapContract.js';
+import { verifyGoldenRelease, type GoldenReleaseIdentity } from './releaseRegistry.js';
+import { explicitProvisioningQuota, runtimeEnvPairs, verifyQuotaConsistency, verifyRuntimeEnvConsistency, REQUIRED_RUNTIME_ENV_KEYS, type RuntimeQuotaConfig } from './quotaContract.js';
 import {
   devicePolicyFor,
-  kvStoreFingerprint,
   verifyAppPassSecret,
   verifyDeviceLockPolicy,
   verifyDeviceLockProbe,
   type DeviceLockSecretsInput,
-} from './deviceLockContract';
-import { aclUsernameFor, provisionTenantAclWithRollback, type TenantAclIdentity } from './aclProvisioning';
-import { customerMonitoringSaAccountId, customerMonitoringSaEmail, wifAudienceFor, type ProvisioningProviders, type WifConfig } from './provisioningProviders';
-import { pacificBillingMonth } from './billingMonth';
+} from './deviceLockContract.js';
+import { kvStoreFingerprint } from './kvStoreFingerprint.js';
+import { aclUsernameFor, provisionTenantAclWithRollback, type TenantAclIdentity } from './aclProvisioning.js';
+import { customerMonitoringSaAccountId, customerMonitoringSaEmail, wifAudienceFor, type ProvisioningProviders, type WifConfig } from './provisioningProviders.js';
+import { pacificBillingMonth } from './billingMonth.js';
 
 export const EXECUTION_GATE_REQUIRED = 'CUSTOMER_PROVISIONING_NOT_AUTHORIZED';
 
-export const BILLING_ACCOUNT_ID_PATTERN = /^[0-9A-Z]{6}-[0-9A-Z]{6}-[0-9A-Z]{6}$/;
 
 export type StageId =
   | 'tenant' | 'vercel' | 'wif' | 'env' | 'places_key' | 'acl' | 'deploy' | 'domain'
-  | 'restriction' | 'iam' | 'quota' | 'usage_smoke' | 'device_lock' | 'billing' | 'finalize';
+  | 'restriction' | 'iam' | 'quota' | 'usage_smoke' | 'device_lock' | 'billing' | 'bootstrap_cleanup' | 'finalize';
 
 export type StageStatus = 'PENDING' | 'RUNNING' | 'PASS' | 'FAILED' | 'SKIPPED';
 
@@ -63,6 +63,10 @@ export interface ProvisioningInput {
   companyName: string;
   slug: string;
   googleProjectId: string;
+  /** Temporary project-scoped bootstrap principal to actively remove after successful provisioning (bare email). */
+  bootstrapMember?: string;
+  /** Verify 5: deployment already triggered+READY by the deploy phase — stage 7 MUST reuse it (never POST a second deployment during validate/finalize re-runs). */
+  existingDeploymentId?: string;
   placesKeyFingerprint: string; // FULL 64-hex uppercase SHA-256 — raw key NEVER enters the executor state
   goldenRelease: GoldenReleaseIdentity;
   executionGate: boolean; // must be true (separately authorized R1 gate — the operator CLI sets it)
@@ -71,7 +75,6 @@ export interface ProvisioningInput {
   /** PRE-R1 — central Upstash store REST URL (NON-SECRET store identifier; used for the ACL env handoff). */
   centralStoreUrl?: string;
   /** PRE-R1 — customer Cloud Billing account id (NON-SECRET evidence; must link exactly ONE project). */
-  billingAccountId?: string;
   /**
    * PRE-R1 A3b WIF scale config (owner correction 2026-08-27):
    * ONE shared provider (owner_id + environment condition) + exact per-project
@@ -117,14 +120,29 @@ export interface ProvisioningResult {
   tenantId: string;
   hostname: string;
   stages: StageRecord[];
-  outcome: 'CUSTOMER_READY' | 'FAILED';
+  outcome: 'CUSTOMER_READY' | 'FAILED' | 'PAUSED';
   failedStageId: StageId | null;
   rollbackMetadata: { tenantId: string; resourceIds: Record<string, string>; createdAt: string };
 }
 
+/** Bounded-execution options for the Workflow/cloud path (Segment 1, Phase 2C). */
+export interface ProvisioningRunOptions {
+  /**
+   * Stop AFTER the stage immediately before this one, without executing it.
+   * The Workflow uses stopBefore:'deploy' to avoid one long synchronous deploy
+   * wait inside a single function step — deploy readiness is then awaited via
+   * the Workflow's own sleep/wait primitives before the next bounded run.
+   * A PAUSED result carries the completed stages; re-running WITHOUT the
+   * option resumes idempotently (all earlier stages find-and-skip).
+   */
+  stopBefore?: StageId;
+  /** S2 — deploy-stage readiness polling (tests inject short intervals). */
+  deployPoll?: { intervalMs?: number; timeoutMs?: number };
+}
+
 const STAGE_ORDER: StageId[] = [
   'tenant', 'vercel', 'wif', 'env', 'places_key', 'acl', 'deploy', 'domain',
-  'restriction', 'iam', 'quota', 'usage_smoke', 'device_lock', 'billing', 'finalize',
+  'restriction', 'iam', 'quota', 'usage_smoke', 'device_lock', 'billing', 'bootstrap_cleanup', 'finalize',
 ];
 
 function initialStages(): StageRecord[] {
@@ -146,6 +164,7 @@ export async function runProvisioning(
   providers: ProvisioningProviders,
   input: ProvisioningInput,
   transient: ProvisioningTransientInput = {},
+  opts: ProvisioningRunOptions = {},
 ): Promise<ProvisioningResult> {
   const stages = initialStages();
   // AUTHORITATIVE tenant identity: the Control Plane tenants.id UUID, created
@@ -191,9 +210,8 @@ export async function runProvisioning(
     // FULL 64-hex uppercase SHA-256 fingerprint required; a raw AIza… key is refused outright
     if (!/^[A-F0-9]{64}$/.test(input.placesKeyFingerprint)) return { ok: false, reason: 'full 64-hex uppercase fingerprint required; raw key refused' };
     if (!input.centralStoreUrl || !input.centralStoreUrl.startsWith('https://')) return { ok: false, reason: 'central store URL required (https)' };
-    if (!input.billingAccountId || !BILLING_ACCOUNT_ID_PATTERN.test(input.billingAccountId)) {
-      return { ok: false, reason: 'billing account id required (6-6-6 alnum format)' };
-    }
+    // S2e: billing is verified by project-side authoritative readback — no
+    // expected billingAccountId input (each customer links their own billing).
     const wif = input.wif;
     if (!wif || !wif.pool || !wif.provider || !wif.centralProjectNumber || !wif.vercelTeamSlug) {
       return { ok: false, reason: 'WIF config required (pool/provider/centralProjectNumber/vercelTeamSlug)' };
@@ -238,12 +256,17 @@ export async function runProvisioning(
   // env = the provisioned customer SA email.
   const wifConfig = input.wif!;
   let customerSaEmail = '';
+  let realBillingAccountId = '';
   const wifOk = await runStage('wif', async () => {
     if (!providers.google) return { ok: false, reason: 'google provider required (fail-closed)' };
+    // S2e: central shared WIF pool/provider is ONE-TIME infrastructure — NEVER
+    // created/modified from the per-customer runtime. Its health is proven
+    // fail-closed by the operator STS exchange itself (worker path: STS must
+    // succeed before ANY customer mutation; CLI path: operator token already
+    // authenticated). wifConfig is still needed below for the customer's OWN
+    // per-project principalSet binding.
     const oidc = await providers.vercel.enableVercelOidc(projectId);
     if (!oidc.ok) return oidc;
-    const provider = await providers.google.reconcileWifProvider(wifConfig);
-    if (!provider.ok) return provider;
     // Customer-specific SA — created/found idempotently in the CUSTOMER project.
     const sa = await providers.google.createMonitoringServiceAccount(
       input.googleProjectId.trim(),
@@ -319,9 +342,16 @@ export async function runProvisioning(
       aclIdentity = { tenantId, username: aclUsernameFor(tenantId), tokenFingerprint: existing.tokenFingerprint };
       return { ok: true, resourceId: aclIdentity.username };
     }
-    const appPassCheck = verifyAppPassSecret(transient.deviceLockSecrets?.appPass);
-    if (!appPassCheck.consistent) return { ok: false, reason: appPassCheck.reasons.join('; ') };
-    const appPass = transient.deviceLockSecrets!.appPass!;
+    // Cloud path (Phase 2C): the start/bootstrap API may have already written
+    // APP_PASS to the customer's encrypted env BEFORE the Workflow run. Raw is
+    // then not required — but ONLY when the env authoritatively exists.
+    // Missing raw AND missing env = FAIL CLOSED (never silently skipped).
+    const appPass = transient.deviceLockSecrets?.appPass;
+    if (!appPass && !existing.appPassPresent) {
+      return { ok: false, reason: 'OWNER ACTION REQUIRED: APP_PASS not configured (raw secret absent and env absent)' };
+    }
+    const appPassCheck = verifyAppPassSecret(appPass);
+    if (appPass && !appPassCheck.consistent) return { ok: false, reason: appPassCheck.reasons.join('; ') };
     const provisioned = await provisionTenantAclWithRollback(providers.redisAcl, tenantId, async (restToken) => {
       const handoff = await providers.deviceLock!.configureDeviceLock(
         projectId,
@@ -341,8 +371,47 @@ export async function runProvisioning(
   });
   if (!aclOk) return finish(providers, tenantId, hostname, stages, rollbackMetadata);
 
+  // Bounded execution (Phase 2C Segment 1): the Workflow splits the run before
+  // the deploy stage — deploy readiness is awaited outside a single step.
+  if (opts.stopBefore === 'deploy') {
+    return finish(providers, tenantId, hostname, stages, rollbackMetadata, true, 'PAUSED');
+  }
+
   // Stage 7 — Golden Standard deployment (AFTER all required env/secrets).
-  const deployOk = await runStage('deploy', () => providers.vercel.deployGolden(projectId, input.goldenRelease));
+  // S2: the trigger returns the deployment id immediately; this stage then
+  // polls readiness explicitly (previous behaviour proceeded without waiting —
+  // later HTTP checks could race the build). Polling params injectable for
+  // tests; the Workflow path may instead stopBefore:'deploy' and poll via its
+  // own durable sleep (cloudRunner), keeping any single step short.
+  const deployOk = await runStage('deploy', async () => {
+    // Verify 5 (S2e pre-E2E): when the deploy phase already produced a READY
+    // deployment, validate/finalize re-runs REUSE it — they must never POST a
+    // second deployment for the same logical provisioning.
+    if (input.existingDeploymentId) {
+      if (!providers.vercel.getDeploymentStatus) return { ok: true, resourceId: input.existingDeploymentId };
+      const probe = await providers.vercel.getDeploymentStatus(input.existingDeploymentId);
+      if (!probe.ok) return probe;
+      const state = (probe.readyState ?? '').toUpperCase();
+      if (state === 'READY') return { ok: true, resourceId: input.existingDeploymentId };
+      return { ok: false, reason: `existing deployment ${state} (not READY) — refusing to retrigger silently` };
+    }
+    const triggered = await providers.vercel.deployGolden(projectId, input.goldenRelease);
+    if (!triggered.ok || !triggered.resourceId) return triggered;
+    if (!providers.vercel.getDeploymentStatus) return { ok: true, resourceId: triggered.resourceId }; // provider without probe — trigger-only
+    const deploymentId = triggered.resourceId;
+    const timeoutMs = opts.deployPoll?.timeoutMs ?? 300_000;
+    const intervalMs = opts.deployPoll?.intervalMs ?? 5_000;
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const probe = await providers.vercel.getDeploymentStatus(deploymentId);
+      if (!probe.ok) return probe;
+      const state = (probe.readyState ?? '').toUpperCase();
+      if (state === 'READY') return { ok: true, resourceId: deploymentId };
+      if (state === 'ERROR' || state === 'CANCELED') return { ok: false, reason: `vercel deployment ${state}` };
+      if (Date.now() > deadline) return { ok: false, reason: 'vercel deployment not READY within timeout' };
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+  });
   if (!deployOk) return finish(providers, tenantId, hostname, stages, rollbackMetadata);
 
   // Stage 8 — bind exact customer subdomain.
@@ -436,7 +505,15 @@ export async function runProvisioning(
     if (failed.some((k) => k !== 'referrerAcceptanceProbe')) {
       return { ok: false, reason: `usage smoke failed: ${failed.filter((k) => k !== 'referrerAcceptanceProbe').join(', ')}` };
     }
-    if (!r.smoke.referrerAcceptanceProbe) {
+    // The referrer-acceptance preflight requires the REAL transient key — it is
+    // only applicable where the raw key exists (CLI/dev path). On the cloud path
+    // the raw key is never available (already written to the customer's
+    // encrypted env and discarded): the preflight is skipped and the
+    // operator-confirmed REAL portal smoke (customer's own browser search on
+    // their first device) is the authoritative restriction proof. With a raw
+    // key present but real smoke NOT yet confirmed, the preflight stays
+    // mandatory (dev path).
+    if (transient.placesApiKey && input.realPortalSmokeConfirmed !== true && !r.smoke.referrerAcceptanceProbe) {
       return { ok: false, reason: 'usage smoke failed: referrer-acceptance preflight did not pass (real key must be in the transient handoff and the referrer restriction must admit the exact origin)' };
     }
     // OWNER CORRECTION: the FINAL real Customer Portal smoke is the
@@ -475,15 +552,66 @@ export async function runProvisioning(
   let billingMonth = '';
   let preActivationUsage = 0;
   const billingOk = await runStage('billing', async () => {
-    const isolation = await providers.google.verifyBillingIsolation(input.billingAccountId!, input.googleProjectId.trim());
-    if (!isolation.ok) return isolation;
+    // S2e billing contract: authoritative project-side readback
+    // (billingEnabled + linked account existence). The linked billing account
+    // id is captured as non-secret evidence — never an expected-value input.
+    const readback = await providers.google.verifyBillingReadback(input.googleProjectId.trim());
+    if (!readback.ok) return readback;
+    realBillingAccountId = readback.billingAccountId ?? '';
     const usage = await providers.google.preActivationPlacesUsage(input.googleProjectId.trim());
     if (!usage.ok) return usage;
     billingMonth = pacificBillingMonth();
     preActivationUsage = usage.usage ?? 0;
-    return { ok: true, resourceId: input.billingAccountId };
+    return { ok: true, resourceId: realBillingAccountId };
   });
   if (!billingOk) return finish(providers, tenantId, hostname, stages, rollbackMetadata);
+
+  // Stage 15 — ACTIVE bootstrap-IAM cleanup (cloud + CLI shared contract):
+  // remove ONLY the exact temporary bootstrap member/roles for THIS customer
+  // project (unrelated bindings/conditions preserved), then read back and
+  // prove those exact bindings absent. projectIamAdmin LAST (policy-read
+  // needed for every earlier removal + the readback). Idempotent.
+  // Cleanup failure = CLEANUP_REQUIRED — the run must NOT proceed to
+  // finalize, so tenants.status can never become ACTIVE before cleanup +
+  // absence readback succeed (authoritative handover ordering).
+  const cleanupOk = await runStage('bootstrap_cleanup', async () => {
+    const member = input.bootstrapMember?.trim();
+    if (!member) {
+      // 2026-09-08 OWNER CONTRACT: automated cleanup is housekeeping, never
+      // ACTIVE authority — staff manually Removes access (finite-expiry is the
+      // fallback). No member configured ⇒ nothing to remove ⇒ non-blocking.
+      await providers.controlPlane.insertAudit({ tenantId, action: 'BOOTSTRAP_CLEANUP_DEFERRED', detail: 'no bootstrap member configured — manual Remove access SOP applies' });
+      return { ok: true };
+    }
+    const adminRole = BOOTSTRAP_ADMIN_ROLE;
+    const earlierRoles = BOOTSTRAP_ROLES.filter((r) => r !== adminRole);
+    const failures: string[] = [];
+    for (const role of earlierRoles) {
+      const r = await providers.google.removeExactRoleBinding(input.googleProjectId.trim(), role, member);
+      if (!r.ok) failures.push(`${role}: ${'reason' in r ? r.reason : 'failed'}`);
+    }
+    if (failures.length === 0) {
+      const readback = await providers.google.verifyBootstrapRolesAbsent(input.googleProjectId.trim(), [...earlierRoles], member);
+      if (!readback.ok) failures.push(`readback: ${'reason' in readback ? readback.reason : 'failed'}`);
+    }
+    if (failures.length === 0) {
+      const r = await providers.google.removeExactRoleBinding(input.googleProjectId.trim(), adminRole, member);
+      if (!r.ok) failures.push(`${adminRole}: ${'reason' in r ? r.reason : 'failed'}`);
+    }
+    if (failures.length > 0) {
+      // Owner contract (2026-09-08): cleanup failure must NOT block ACTIVE.
+      // Bindings carry finite expiry; staff removal is the primary SOP. The
+      // failure is recorded as non-blocking audit evidence only.
+      await providers.controlPlane.insertAudit({
+        tenantId,
+        action: 'BOOTSTRAP_CLEANUP_DEFERRED',
+        detail: `manual Remove access SOP / finite-expiry fallback applies: ${failures.join('; ')}`,
+      });
+      return { ok: true };
+    }
+    return { ok: true, resourceId: input.googleProjectId.trim() };
+  });
+  if (!cleanupOk) return finish(providers, tenantId, hostname, stages, rollbackMetadata);
 
   // Stage 15 — persist safe customer config (incl. billing + ACL evidence)
   // + finalize Control Plane record.
@@ -517,7 +645,7 @@ export async function runProvisioning(
       devicePolicy: devicePolicyFor(tenantId, storeFingerprint),
       // PRE-R1 evidence (non-secret): billing + per-tenant ACL identity +
       // the customer's OWN monitoring SA email (A3b; ownership = customer project)
-      billingAccountId: input.billingAccountId,
+      billingAccountId: realBillingAccountId,
       billingActivationMonth: billingMonth,
       billingPreActivationUsage: preActivationUsage,
       aclUsername: aclIdentity?.username,
@@ -549,10 +677,11 @@ function finish(
   stages: StageRecord[],
   rollbackMetadata: ProvisioningResult['rollbackMetadata'],
   finalizeOk = true,
+  pausedOutcome: 'PAUSED' | null = null,
 ): ProvisioningResult {
   void providers;
   const failed = stages.find((s) => s.status === 'FAILED');
-  const outcome = failed || !finalizeOk ? 'FAILED' : stages.every((s) => s.status === 'PASS') ? 'CUSTOMER_READY' : 'FAILED';
+  const outcome = pausedOutcome ?? (failed || !finalizeOk ? 'FAILED' : stages.every((s) => s.status === 'PASS') ? 'CUSTOMER_READY' : 'FAILED');
   return {
     tenantId,
     hostname,

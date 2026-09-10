@@ -12,7 +12,7 @@
  * (VITE_CUSTOMER_* build-time) — the customer runtime never depends on the
  * Control Dashboard being available.
  */
-import { createQuotaPolicy, type Signal } from '../domain';
+import { createQuotaPolicy, type Signal } from '../domain.js';
 
 export const QUOTA_CONTRACT = Object.freeze({
   monthlyTarget: 1000,

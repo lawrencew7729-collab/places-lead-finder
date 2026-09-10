@@ -19,9 +19,9 @@
  *  - no automatic fleet rollout: one explicit tenant per invocation
  */
 import { createHash } from 'node:crypto';
-import { runProvisioning, type ProvisioningInput, type ProvisioningResult } from './executor';
-import type { ProvisioningProviders } from './provisioningProviders';
-import type { GoldenReleaseIdentity } from './releaseRegistry';
+import { runProvisioning, type ProvisioningInput, type ProvisioningResult } from './executor.js';
+import type { ProvisioningProviders } from './provisioningProviders.js';
+import type { GoldenReleaseIdentity } from './releaseRegistry.js';
 
 export const OPERATOR_ENV_KEYS = Object.freeze([
   'VERCEL_TOKEN',
@@ -44,7 +44,7 @@ export interface OperatorCliArgs {
   companyName: string;
   slug: string;
   googleProjectId: string;
-  billingAccountId: string;
+  billingAccountId?: string; // legacy — no longer required (project-side readback)
   releaseTag: string;
   releaseVersion: string;
   releaseCommitSha: string;
@@ -80,30 +80,18 @@ export interface OperatorCliDeps {
 }
 
 export interface OperatorCliResult {
-  outcome: 'CUSTOMER_READY' | 'FAILED' | 'REFUSED' | 'ABORTED';
+  outcome: 'CUSTOMER_READY' | 'FAILED' | 'REFUSED' | 'ABORTED' | 'PAUSED';
   reason?: string;
   result?: ProvisioningResult;
   /** Bootstrap-cleanup outcome (only present when provisioning reached CUSTOMER_READY). */
   bootstrapCleanup?: { status: 'REMOVED' | 'CLEANUP_REQUIRED'; roles: string[]; reason?: string };
 }
 
-/**
- * TEMPORARY PROJECT-SCOPED BOOTSTRAP (owner-approved 2026-08-31):
- * the Lead Finder operator principal is granted ONLY these project-scoped roles by the
- * customer for the provisioning window, then actively removed with readback proof.
- * roles/viewer is required for projects.getBillingInfo (billing.resourceAssociations.list
- * at project scope) — billing-account IAM is deliberately NEVER requested.
- */
-export const BOOTSTRAP_MEMBER = 'admin@leadfinder.business';
-export const BOOTSTRAP_ROLES = [
-  'roles/iam.serviceAccountAdmin',
-  'roles/iam.serviceAccountViewer',
-  'roles/monitoring.viewer',
-  'roles/viewer',
-  // projectIamAdmin LAST (2026-09-04): removing it revokes the ability to read
-  // the project policy — every earlier removal must complete before it goes.
-  'roles/resourcemanager.projectIamAdmin',
-] as const;
+// Shared bootstrap contract lives in bootstrapContract.ts so the cloud
+// executor path removes the EXACT same set (re-export keeps CLI callers/tests
+// working unchanged).
+import { BOOTSTRAP_MEMBER, BOOTSTRAP_ROLES } from './bootstrapContract.js';
+export { BOOTSTRAP_MEMBER, BOOTSTRAP_ROLES } from './bootstrapContract.js';
 
 /** Active cleanup of the temporary bootstrap IAM after successful provisioning (idempotent, readback-proven). */
 async function cleanupBootstrap(providers: ProvisioningProviders, googleProjectId: string): Promise<{ status: 'REMOVED' | 'CLEANUP_REQUIRED'; roles: string[]; reason?: string }> {
@@ -147,7 +135,6 @@ export async function runOperatorCli(deps: OperatorCliDeps): Promise<OperatorCli
 
   // 2. Input validation (mirrors the executor's tenant-stage validation).
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(deps.args.slug)) return { outcome: 'REFUSED', reason: 'invalid slug' };
-  if (!/^[0-9A-Z]{6}-[0-9A-Z]{6}-[0-9A-Z]{6}$/.test(deps.args.billingAccountId)) return { outcome: 'REFUSED', reason: 'invalid billing account id' };
 
   // 3. Transient secrets via HIDDEN prompts only. The raw Places key is
   // fingerprinted here and discarded immediately — only the fingerprint is
@@ -163,7 +150,6 @@ export async function runOperatorCli(deps: OperatorCliDeps): Promise<OperatorCli
     `Company   : ${deps.args.companyName}`,
     `Slug      : ${deps.args.slug} → https://${deps.args.slug}.leadfinder.business`,
     `GCP project: ${deps.args.googleProjectId}`,
-    `Billing acct: ${deps.args.billingAccountId}`,
     `Release   : ${deps.args.releaseTag} @ ${deps.args.releaseCommitSha.slice(0, 8)}`,
     `Key fp    : ${fingerprint.slice(0, 8)}…${fingerprint.slice(-4)} (64-hex SHA-256)`,
   ].join('\n');
@@ -209,7 +195,7 @@ export async function runOperatorCli(deps: OperatorCliDeps): Promise<OperatorCli
     executionGate: true, // ONLY after env + confirmation checks passed
     centralStore: true,
     centralStoreUrl: deps.env.CENTRAL_STORE_URL!,
-    billingAccountId: deps.args.billingAccountId,
+    bootstrapMember: BOOTSTRAP_MEMBER,
     websiteRestrictionConfirmed: true, // face-to-face checkpoint passed (owner final decision 1)
     wif: {
       pool: deps.env.WIF_POOL!,

@@ -14,6 +14,30 @@ describe('Phase 1 dashboard foundation', () => {
     expect(screen.queryByText(/blocked_by_p0_gate/i)).not.toBeInTheDocument();
   });
 
+  it('login page uses simplified staff copy without architecture/governance slogans', () => {
+    render(<App />);
+    // single LEAD FINDER brand (top BrandMark only — no duplicate eyebrow inside the copy)
+    expect(screen.getAllByText('LEAD FINDER')).toHaveLength(1);
+    expect(screen.getByRole('heading', { name: /Customer Onboarding & Management/i })).toBeVisible();
+    expect(screen.getByText(/Create, provision and manage Lead Finder customer accounts/i)).toBeVisible();
+    // core entry remains
+    expect(screen.getByText('OPERATOR ACCESS')).toBeVisible();
+    expect(screen.getByRole('heading', { name: /control dashboard/i })).toBeVisible();
+    expect(screen.getByText(/Authorized operator access only/i)).toBeVisible();
+    expect(screen.getByText('SECURE OPERATOR ACCESS')).toBeVisible();
+    // architecture/governance wording absent
+    expect(screen.queryByText(/CUSTOMER CONTROL PLANE/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/One standard/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/every customer isolated/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/customer failure/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/isolated runtime/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/immutable releases/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/full audit trail/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/SUPABASE AUTH/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/FAIL-CLOSED ACCESS CONTROL/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/NO LOCAL BYPASS/i)).not.toBeInTheDocument();
+  });
+
   it('enters review mode and exposes all Phase 1 foundation areas', async () => {
     const user = userEvent.setup();
     render(<App />);

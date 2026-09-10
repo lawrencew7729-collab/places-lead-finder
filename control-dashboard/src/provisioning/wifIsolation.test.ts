@@ -12,9 +12,9 @@
  * simulation (transport-injected) — no live cloud mutation.
  */
 import { describe, expect, it } from 'vitest';
-import { createGoogleAdapter } from './adapters';
-import { principalSetFor, customerMonitoringSaEmail, customerMonitoringSaAccountId } from './provisioningProviders';
-import type { WifConfig } from './provisioningProviders';
+import { createGoogleAdapter } from './adapters.js';
+import { principalSetFor, customerMonitoringSaEmail, customerMonitoringSaAccountId } from './provisioningProviders.js';
+import type { WifConfig } from './provisioningProviders.js';
 
 const WIF: WifConfig = {
   pool: 'lf-vercel-wif',
@@ -40,11 +40,15 @@ interface WifSimState {
   pools: Set<string>;
   sas: Map<string, { bindings: Map<string, Set<string>>; keys: string[] }>;
   projects: Map<string, { iam: Map<string, Set<string>> }>;
+  /** ChatGPT-review FINDING B: conditional (expiring) project bindings live separately. */
+  conditional: Map<string, Array<{ role: string; member: string; condition: { title: string } }>>;
+  /** Captured get/setIamPolicy request bodies for v3 assertions. */
+  iamRequests: Array<{ op: 'get' | 'set'; project: string; body: unknown }>;
 }
 
 /** Stateful in-memory simulation of the IAM/WIF/CRM endpoints the adapter calls. */
 function wifSim() {
-  const state: WifSimState = { providers: new Map(), pools: new Set(), sas: new Map(), projects: new Map() };
+  const state: WifSimState = { providers: new Map(), pools: new Set(), sas: new Map(), projects: new Map(), conditional: new Map(), iamRequests: [] };
   const calls: string[] = [];
 
   const saFor = (email: string) => {
@@ -118,12 +122,31 @@ function wifSim() {
       const op = m[2];
       const project = projectFor(projectId);
       if (op === 'get') {
-        const bindings = Array.from(project.iam.entries()).map(([role, members]) => ({ role, members: Array.from(members) }));
-        return status(200, { etag: 'E1', bindings });
+        state.iamRequests.push({ op: 'get', project: projectId, body });
+        const conditional = state.conditional.get(projectId) ?? [];
+        const bindings = [
+          ...Array.from(project.iam.entries()).map(([role, members]) => ({ role, members: Array.from(members) })),
+          ...conditional.map((c) => ({ role: c.role, members: [c.member], condition: c.condition })),
+        ];
+        return status(200, { etag: 'E1', version: conditional.length ? 3 : 1, bindings });
       }
-      const nextBindings: Array<{ role: string; members: string[] }> = body?.policy?.bindings ?? [];
+      state.iamRequests.push({ op: 'set', project: projectId, body });
+      const nextBindings: Array<{ role: string; members: string[]; condition?: unknown }> = body?.policy?.bindings ?? [];
       project.iam.clear();
-      for (const b of nextBindings) project.iam.set(b.role, new Set(b.members));
+      state.conditional.delete(projectId);
+      for (const b of nextBindings) {
+        if (b.condition) {
+          for (const member of b.members) {
+            const list = state.conditional.get(projectId) ?? [];
+            list.push({ role: b.role, member, condition: b.condition as { title: string } });
+            state.conditional.set(projectId, list);
+          }
+        } else {
+          const existing = project.iam.get(b.role) ?? new Set<string>();
+          for (const member of b.members) existing.add(member);
+          project.iam.set(b.role, existing);
+        }
+      }
       return status(200, { etag: 'E2', bindings: nextBindings });
     }
 
@@ -343,3 +366,65 @@ describe('A3b — cross-customer isolation (negative suite, local)', () => {
     expect(bBindings.has(MEMBER_B)).toBe(true);
   });
 });
+
+describe('ChatGPT review FINDINGS A-E regressions (2026-09-06)', () => {
+  async function onboardNoReconcile(adapter: ReturnType<typeof createGoogleAdapter>, state: WifSimState, calls: string[], vercelProject: string, googleProject: string, tenantId: string) {
+    const saEmail = customerMonitoringSaEmail(googleProject, tenantId);
+    const r2 = await adapter.createMonitoringServiceAccount(googleProject, customerMonitoringSaAccountId(tenantId));
+    if (!r2.ok || !r2.saEmail) throw new Error(`create SA: ${(r2 as { reason: string }).reason}`);
+    const r3 = await adapter.verifyUserManagedKeys(saEmail);
+    if (!r3.ok) throw new Error(`keys: ${(r3 as { reason: string }).reason}`);
+    const r4 = await adapter.grantMonitoringViewer(googleProject, saEmail);
+    if (!r4.ok) throw new Error(`viewer: ${(r4 as { reason: string }).reason}`);
+    const r5 = await adapter.grantServiceUsageConsumer(googleProject, saEmail);
+    if (!r5.ok) throw new Error(`consumer: ${(r5 as { reason: string }).reason}`);
+    const r6 = await adapter.grantWorkloadIdentityUser(vercelProject, WIF, saEmail);
+    if (!r6.ok) throw new Error(`binding: ${(r6 as { reason: string }).reason}`);
+    const r7 = await adapter.verifyWifOnboarding(vercelProject, WIF, saEmail, googleProject);
+    if (!r7.ok) throw new Error(`readback: ${(r7 as { reason: string }).reason}`);
+    return saEmail;
+  }
+
+  it('A: per-customer verifyWifOnboarding performs ZERO central pool/provider requests', async () => {
+    const { adapter, state, calls } = wifSim();
+    const saEmail = await onboardNoReconcile(adapter, state, calls, VERCEL_A, PRJ_A, TID_A);
+    expect(saEmail).toContain('@customer-a-google-123.');
+    const central = calls.filter((c) => c.includes('workloadIdentityPools'));
+    expect(central).toEqual([]);
+  });
+
+  it('B/C/D: conditional bootstrap binding preserved; separate unconditional binding added; get asks v3; set keeps version/etag/condition', async () => {
+    const { adapter, state } = wifSim();
+    const saEmail = customerMonitoringSaEmail(PRJ_A, TID_A);
+    const bootstrapMember = 'serviceAccount:operator-sa@leadfinder-shared-monitoring.iam.gserviceaccount.com';
+    // seed the expiring conditional binding BEFORE any grant
+    state.conditional.set(PRJ_A, [{ role: 'roles/monitoring.viewer', member: bootstrapMember, condition: { title: 'Lead Finder Bootstrap' } }]);
+    const grant = await adapter.grantMonitoringViewer(PRJ_A, saEmail);
+    expect(grant.ok).toBe(true);
+    const cond = state.conditional.get(PRJ_A)!;
+    expect(cond).toEqual([{ role: 'roles/monitoring.viewer', member: bootstrapMember, condition: { title: 'Lead Finder Bootstrap' } }]);
+    const unconditional = state.projects.get(PRJ_A)!.iam.get('roles/monitoring.viewer');
+    expect(unconditional?.has(`serviceAccount:${saEmail}`)).toBe(true);
+    const getReq = state.iamRequests.find((r) => r.op === 'get');
+    expect((getReq?.body as { options?: { requestedPolicyVersion?: number } })?.options?.requestedPolicyVersion).toBe(3);
+    const setReq = state.iamRequests.find((r) => r.op === 'set');
+    const pol = (setReq?.body as { policy?: { version?: number; etag?: string; bindings?: Array<{ role: string; members: string[]; condition?: unknown }> } })?.policy;
+    expect(pol?.version).toBe(3);
+    expect(pol?.etag).toBe('E1');
+    expect(pol?.bindings?.some((b) => b.condition && b.members.includes(bootstrapMember))).toBe(true);
+  });
+
+  it('E: verifyWifOnboarding REJECTS a customer SA whose monitoring.viewer exists ONLY through a conditional binding', async () => {
+    const { adapter, state } = wifSim();
+    const saEmail = customerMonitoringSaEmail(PRJ_A, TID_A);
+    state.conditional.set(PRJ_A, [{ role: 'roles/monitoring.viewer', member: `serviceAccount:${saEmail}`, condition: { title: 'Lead Finder Bootstrap' } }]);
+    const r2 = await adapter.createMonitoringServiceAccount(PRJ_A, customerMonitoringSaAccountId(TID_A));
+    expect(r2.ok).toBe(true);
+    await adapter.grantServiceUsageConsumer(PRJ_A, saEmail);
+    await adapter.grantWorkloadIdentityUser(VERCEL_A, WIF, saEmail);
+    const res = await adapter.verifyWifOnboarding(VERCEL_A, WIF, saEmail, PRJ_A);
+    expect(res.ok).toBe(false);
+    expect((res as { reason?: string }).reason).toContain('unconditional monitoring.viewer');
+  });
+});
+

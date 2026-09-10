@@ -4,7 +4,6 @@ import {
   DEVICE_LOCK_ENV_KEYS,
   deviceLockNamespaceFor,
   devicePolicyFor,
-  kvStoreFingerprint,
   normalizeKvStoreUrl,
   verifyDeviceLockPolicy,
   verifyDeviceLockProbe,
@@ -12,7 +11,8 @@ import {
   type DeviceLockProbe,
   type DeviceLockSecretsInput,
   type DevicePolicy,
-} from './deviceLockContract';
+} from './deviceLockContract.js';
+import { kvStoreFingerprint } from './kvStoreFingerprint.js';
 
 const VALID_SECRETS: DeviceLockSecretsInput = {
   kvRestApiUrl: 'https://store-abc.upstash.io',

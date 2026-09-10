@@ -21,12 +21,16 @@
  *   - apply exact website referrer restriction / API restriction in Google Console
  * The executor only VERIFIES referrer readiness (bounded, read-only).
  */
-import type { GoldenReleaseIdentity } from './releaseRegistry';
-import type { RuntimeQuotaConfig } from './quotaContract';
-import { KV_REST_API_TOKEN_FINGERPRINT_KEY, type DeviceLockProbe, type DeviceLockSecretsInput, type DevicePolicy } from './deviceLockContract';
-import { aclTokenFingerprint, type RedisAclAdmin } from './aclProvisioning';
+import type { GoldenReleaseIdentity } from './releaseRegistry.js';
+import type { RuntimeQuotaConfig } from './quotaContract.js';
+import { KV_REST_API_TOKEN_FINGERPRINT_KEY, type DeviceLockProbe, type DeviceLockSecretsInput, type DevicePolicy } from './deviceLockContract.js';
+import { aclTokenFingerprint, type RedisAclAdmin } from './aclProvisioning.js';
 
 export type ProviderResult = { ok: true; resourceId?: string } | { ok: false; reason: string };
+
+export type AppPassHandoffResult =
+  | { ok: true; resourceId?: string; appPassState: 'created' | 'retained' }
+  | { ok: false; reason: string };
 
 /**
  * A3b WIF SCALE DESIGN (owner correction 2026-08-27; owner record
@@ -110,6 +114,8 @@ export interface RuntimeEnvInput {
 export interface VercelProvider {
   createProject(tenantId: string, slug: string): Promise<ProviderResult>;
   deployGolden(projectId: string, release: GoldenReleaseIdentity): Promise<ProviderResult>;
+  /** S2 — deployment readiness probe (readyState: READY | BUILDING | QUEUED | ERROR | CANCELED). */
+  getDeploymentStatus(deploymentId: string): Promise<ProviderResult & { readyState?: string }>;
   bindDomain(projectId: string, hostname: string): Promise<ProviderResult>;
   setRuntimeEnv(projectId: string, env: RuntimeEnvInput): Promise<ProviderResult>;
   /** PRE-R1 — enable Vercel OIDC (team issuer mode) on the customer project, idempotent. */
@@ -126,7 +132,16 @@ export interface VercelProvider {
  * The raw value never enters serializable provisioning state.
  */
 export interface SecretHandoff {
+  /** Places key → encrypted VITE_PLACES_API_KEY (idempotent; raw optional when env exists). */
   configurePlacesKey(projectId: string, rawPlacesKey?: string): Promise<ProviderResult>;
+  /** APP_PASS → encrypted APP_PASS env (idempotent; raw optional when env exists). Phase 2C cloud path. */
+  /**
+   * @returns appPassState: 'created' when this call wrote the code into the
+   *   customer env; 'retained' when an existing APP_PASS was kept (never
+   *   overwritten). The UI must NOT present a freshly generated code as valid
+   *   when the runtime retained a previous one (retry/recovery mismatch).
+   */
+  configureAppPass(projectId: string, rawAppPass?: string): Promise<AppPassHandoffResult>;
 }
 
 /**
@@ -147,7 +162,8 @@ export interface SecretHandoff {
  */
 export interface DeviceLockProvider {
   configureDeviceLock(projectId: string, secrets: DeviceLockSecretsInput, tenantId: string): Promise<ProviderResult>;
-  readStoreEnv(projectId: string): Promise<ProviderResult & { tokenPresent?: boolean; tokenFingerprint?: string; storeUrl?: string }>;
+  /** Read-only env probe: store credential presence + fingerprint + APP_PASS presence. */
+  readStoreEnv(projectId: string): Promise<ProviderResult & { storeUrl?: string; tokenPresent?: boolean; tokenFingerprint?: string; appPassPresent?: boolean }>;
   verifyDeviceLock(hostname: string): Promise<ProviderResult & { probe?: DeviceLockProbe }>;
 }
 
@@ -173,8 +189,14 @@ export interface GoogleProvider {
   verifyBootstrapRolesAbsent(googleProjectId: string, roles: string[], member: string): Promise<ProviderResult>;
   /** A3b: offboarding/rollback — remove the exact principalSet member from THAT customer's SA only. */
   revokeWifOnboarding(projectId: string, wif: WifConfig, customerMonitoringSa: string): Promise<ProviderResult>;
-  /** PRE-R1 — billing account links EXACTLY ONE project == the customer project (read-only). */
-  verifyBillingIsolation(billingAccountId: string, googleProjectId: string): Promise<ProviderResult>;
+  /**
+   * S2e billing contract: project-side authoritative readback
+   * (projects/{id}/billingInfo) — billingEnabled must be true and a linked
+   * billingAccountName must exist. NO expected-value comparison, NO billing
+   * account IAM, NO manual billing input. Returns the linked billing account
+   * id as non-secret evidence.
+   */
+  verifyBillingReadback(googleProjectId: string): Promise<ProviderResult & { billingAccountId?: string }>;
   /** PRE-R1 — Places request_count in the Pacific activation month (conservative proxy; 0 required). */
   preActivationPlacesUsage(googleProjectId: string): Promise<ProviderResult & { usage?: number }>;
 }
@@ -186,12 +208,30 @@ export interface ControlPlaneProvider {
   insertCustomerConfig(config: CustomerConfigInput): Promise<ProviderResult>;
   insertRelease(identity: GoldenReleaseIdentity): Promise<ProviderResult>;
   insertAudit(event: { tenantId: string; action: string; detail: string }): Promise<ProviderResult>;
-  findTenantBySlug(slug: string): Promise<ProviderResult & { tenantId?: string }>;
+  /** S2e pre-E2E: most recent audit row for (tenant, action) — duplicate-run protection uses action timing. */
+  getLastAudit(tenantId: string, action: string): Promise<ProviderResult & { at?: string }>;
+  /** S2e pre-E2E: most recent WORKFLOW_STARTED:<runId> audit — evidence only (never the locking primitive). */
+  getLastWorkflowStart(tenantId: string): Promise<ProviderResult & { runId?: string; at?: string }>;
+  /** S2e FINAL: atomic reservation acquire — exactly ONE winner per tenant (RPC reserve_provisioning_start). */
+  reserveProvisioningStart(tenantId: string, reservationToken: string): Promise<ProviderResult & { winner?: boolean }>;
+  /** S2e FINAL: link the real workflow runId to the reservation (CAS on token; idempotent — workflow self-link uses this). */
+  linkProvisioningRun(tenantId: string, reservationToken: string, runId: string): Promise<ProviderResult & { linked?: boolean }>;
+  /** S2e FINAL: release a reservation (CAS on token — retry after an authoritatively terminal run). */
+  releaseProvisioningReservation(tenantId: string, reservationToken: string): Promise<ProviderResult & { released?: boolean }>;
+  /** S2e FINAL: read the reservation state (token/runId) for the tenant. */
+  readProvisioningReservation(tenantId: string): Promise<ProviderResult & { reservationToken?: string | null; runId?: string | null }>;
+  findTenantBySlug(slug: string): Promise<ProviderResult & { tenantId?: string; tenantStatus?: string | null }>;
+  /** S2b — tenant existence by authoritative id (smoke-confirm gate). */
+  findTenantById(tenantId: string): Promise<ProviderResult & { tenantId?: string; slug?: string }>;
   findConfigByTenant(tenantId: string): Promise<ProviderResult & { config?: CustomerConfigInput }>;
   /** PRE-R1 — dedicated-store uniqueness guard (central model skips it). */
   findByStoreFingerprint(fingerprint: string): Promise<ProviderResult & { tenantId?: string }>;
   /** PRE-R1 — authoritative release registry lookup (unknown tag → not found → FAIL). */
-  findRelease(tag: string): Promise<ProviderResult & { release?: GoldenReleaseIdentity }>;
+  findRelease(tag: string): Promise<ProviderResult & { release?: import('./releaseRegistry.js').GoldenReleaseIdentity }>;
+  /** S2c — latest APPROVED release from the trusted registry (server-derived golden release). */
+  listLatestApprovedRelease(): Promise<ProviderResult & { release?: import('./releaseRegistry.js').GoldenReleaseIdentity }>;
+  /** S2d — authoritative operator profile (operator_profiles → role/active). */
+  getOperatorProfile(userId: string): Promise<ProviderResult & { profile?: { userId: string; role: string; active: boolean } }>;
 }
 
 export interface HealthProvider {
@@ -229,7 +269,11 @@ export interface UsageSmokeReport {
 export interface UsageSmokeProvider {
   /**
    * @param hostname exact customer origin (no scheme)
-   * @param placesApiKey transient raw customer key — absent ⇒ referrerAcceptanceProbe fails closed
+   * @param placesApiKey transient raw customer key — absent ⇒ the adapter
+   *   REPORTS referrerAcceptanceProbe=false (probe cannot run); the adapter
+   *   never fails the whole smoke for the probe alone — the executor owns the
+   *   fail-closed policy (key present + probe false → FAIL; key absent on the
+   *   cloud path → real portal-smoke hold).
    */
   run(hostname: string, placesApiKey?: string): Promise<ProviderResult & { smoke?: UsageSmokeReport }>;
 }
@@ -261,25 +305,41 @@ export interface FakeProviders extends ProvisioningProviders {
   setBillingProjects(billingAccountId: string, projectIds: string[]): void;
   /** Test control: seed project IAM (role -> members) to simulate the customer's temporary bootstrap grant. */
   __seedProjectIam(googleProjectId: string, role: string, members: string[]): void;
+  /** S2e closure — test hook: read back a project's IAM (role -> members) for cleanup absence proofs. */
+  __getProjectIam(googleProjectId: string): Map<string, string[]> | undefined;
   /** 2026-09-04 — test hook: read back a fake tenant's status by slug. */
   __getTenantStatus(slug: string): string | undefined;
+  /** 2026-09-04 — test hook: read back audit rows (raw-secret non-persistence proof). */
+  __audits(): Array<{ tenantId: string; action: string; detail: string }>;
+  /** S2d — test hook: seed an operator profile (role enforcement). */
+  __seedOperatorProfile(userId: string, role: string, active?: boolean): void;
+  /** S2e Fix 2 — test hook: inject a ONE-SHOT failure for the next call of the named operation. */
+  __failNext(name: string): void;
 }
 
 export function createFakeProviders(options: { failAt?: string[] } = {}): FakeProviders {
   const failures = new Set(options.failAt ?? []);
+  const oneShotFailures = new Set<string>();
   const projects = new Map<string, string>(); // tenantId -> projectId
   const domains = new Map<string, string>(); // hostname -> projectId
   const tenants = new Map<string, { id: string; hostname: string; status: string }>();
+  // S2e FINAL: atomic reservation state (fake mirrors the RPC semantics — the
+  // reserve check+write happens synchronously so concurrent awaits serialize).
+  const reservations = new Map<string, { token: string | null; runId: string | null }>();
   const configs = new Map<string, CustomerConfigInput>();
   const releases = new Map<string, GoldenReleaseIdentity>();
-  const audits: Array<{ tenantId: string; action: string }> = [];
+  const operatorProfiles = new Map<string, { userId: string; role: string; active: boolean }>();
+  const audits: Array<{ tenantId: string; action: string; detail: string; at: string }> = [];
   const deviceLockConfigured = new Map<string, { secrets: DeviceLockSecretsInput; tenantId: string }>(); // projectId -> config
   const deviceLockOpenHosts = new Set<string>(); // force-open simulation (env drift)
   const projectEnv = new Map<string, Map<string, { value: string; encrypted: boolean }>>(); // projectId -> key -> value
   const oidcEnabled = new Set<string>(); // projectIds with team-mode OIDC
-  let wifProviderCreated = false;
+  // S2e: the central shared WIF provider is ONE-TIME pre-existing
+  // infrastructure (never created/modified per customer) — the fake starts
+  // with it present, mirroring the live central project.
+  let wifProviderCreated = true;
+  let wifProviderCondition = 'assertion.owner_id == "team_zYcaTVVBfNNI7QeVpwABxkan" && assertion.environment == "production"';
   let aclGentokenCounter = 0;
-  let wifProviderCondition = '';
   // A3b: per-customer monitoring SA state (SA lives in the CUSTOMER project).
   const customerSas = new Map<string, { googleProjectId: string; accountId: string; userManagedKeys: number; bindings: Set<string> }>(); // saEmail -> state
   const projectIam = new Map<string, Map<string, string[]>>(); // projectId -> role -> members
@@ -288,8 +348,14 @@ export function createFakeProviders(options: { failAt?: string[] } = {}): FakePr
   const billingProjects = new Map<string, string[]>(); // billingAccountId -> linked project ids
   const usageSmokeFailHosts = new Set<string>();
 
-  const maybeFail = (stage: string): ProviderResult | null =>
-    failures.has(stage) ? { ok: false, reason: `${stage} simulated failure` } : null;
+  const maybeFail = (stage: string): ProviderResult | null => {
+    if (failures.has(stage)) return { ok: false, reason: `${stage} simulated failure` };
+    if (oneShotFailures.has(stage)) {
+      oneShotFailures.delete(stage);
+      return { ok: false, reason: `${stage} injected one-shot failure` };
+    }
+    return null;
+  };
 
   const envOf = (projectId: string): Map<string, { value: string; encrypted: boolean }> => {
     let env = projectEnv.get(projectId);
@@ -314,6 +380,9 @@ export function createFakeProviders(options: { failAt?: string[] } = {}): FakePr
     setBillingProjects(billingAccountId: string, projectIds: string[]) {
       billingProjects.set(billingAccountId, projectIds);
     },
+    __getProjectIam(googleProjectId: string) {
+      return projectIam.get(googleProjectId);
+    },
     __seedProjectIam(googleProjectId: string, role: string, members: string[]) {
       const roles = projectIam.get(googleProjectId) ?? new Map<string, string[]>();
       const existing = roles.get(role) ?? [];
@@ -322,6 +391,15 @@ export function createFakeProviders(options: { failAt?: string[] } = {}): FakePr
     },
     __getTenantStatus(slug: string) {
       return tenants.get(slug)?.status;
+    },
+    __audits() {
+      return [...audits];
+    },
+    __seedOperatorProfile(userId: string, role: string, active = true) {
+      operatorProfiles.set(userId, { userId, role, active });
+    },
+    __failNext(name: string) {
+      oneShotFailures.add(name);
     },
     vercel: {
       async createProject(tenantId, slug) {
@@ -336,6 +414,12 @@ export function createFakeProviders(options: { failAt?: string[] } = {}): FakePr
         const fail = maybeFail('vercel.deployGolden');
         if (fail) return fail;
         return { ok: true, resourceId: `dpl_fake_${release.version}` };
+      },
+      async getDeploymentStatus(deploymentId) {
+        const fail = maybeFail('vercel.getDeploymentStatus');
+        if (fail) return fail;
+        // fake: deployments become READY on first probe unless in the failure set
+        return { ok: true, resourceId: deploymentId, readyState: 'READY' };
       },
       async bindDomain(projectId, hostname) {
         const fail = maybeFail('vercel.bindDomain');
@@ -502,13 +586,25 @@ export function createFakeProviders(options: { failAt?: string[] } = {}): FakePr
         if (remaining.length > 0) return { ok: false, reason: `bootstrap roles still bound to ${member}: ${remaining.join(', ')}` };
         return { ok: true, resourceId: googleProjectId };
       },
-      async verifyBillingIsolation(billingAccountId, googleProjectId) {
-        const fail = maybeFail('google.verifyBillingIsolation');
+      async verifyBillingReadback(googleProjectId) {
+        const fail = maybeFail('google.verifyBillingReadback');
         if (fail) return fail;
-        const linked = billingProjects.get(billingAccountId) ?? [googleProjectId]; // honest default: exactly the customer project
-        if (linked.length !== 1) return { ok: false, reason: `billing account links ${linked.length} projects (exactly 1 required)` };
-        if (linked[0] !== googleProjectId) return { ok: false, reason: 'billing account project ≠ customer project' };
-        return { ok: true, resourceId: billingAccountId };
+        // fake mirrors the project-side readback AND keeps the isolation
+        // contract observable (a seeded account linking ≠1 project fails) —
+        // the live adapter cannot reverse-lookup account links without billing
+        // IAM, so this stays a fake-side contract check + live readback evidence.
+        let linkedAccount: string | undefined;
+        billingProjects.forEach((projectIds, billingAccountId) => {
+          if (projectIds.includes(googleProjectId)) linkedAccount = billingAccountId;
+        });
+        if (linkedAccount) {
+          const projectIds = billingProjects.get(linkedAccount) ?? [];
+          if (projectIds.length !== 1) return { ok: false, reason: `billing account links ${projectIds.length} projects (exactly 1 required)` };
+          return { ok: true, resourceId: linkedAccount, billingAccountId: linkedAccount };
+        }
+        // honest default when no explicit link was seeded: the project is
+        // linked to exactly its own billing (mirrors live enabled+linked)
+        return { ok: true, resourceId: `01B61E-759031-B494E4`, billingAccountId: `01B61E-759031-B494E4` };
       },
       async preActivationPlacesUsage(googleProjectId) {
         const fail = maybeFail('google.preActivationPlacesUsage');
@@ -571,14 +667,74 @@ export function createFakeProviders(options: { failAt?: string[] } = {}): FakePr
       async insertAudit(event) {
         const fail = maybeFail('cp.insertAudit');
         if (fail) return fail;
-        audits.push(event);
+        audits.push({ ...event, at: new Date().toISOString() });
         return { ok: true };
       },
+      async getLastAudit(tenantId, action) {
+        const fail = maybeFail('cp.getLastAudit');
+        if (fail) return fail;
+        const matches = audits.filter((a) => a.tenantId === tenantId && a.action === action);
+        const last = matches[matches.length - 1];
+        return last ? { ok: true, at: last.at } : { ok: true };
+      },
+      async getLastWorkflowStart(tenantId) {
+        const fail = maybeFail('cp.getLastWorkflowStart');
+        if (fail) return fail;
+        const matches = audits.filter((a) => a.tenantId === tenantId && a.action.startsWith('WORKFLOW_STARTED:'));
+        const last = matches[matches.length - 1];
+        if (!last) return { ok: true };
+        return { ok: true, runId: last.action.slice('WORKFLOW_STARTED:'.length), at: last.at };
+      },
+      async reserveProvisioningStart(tenantId, reservationToken) {
+        const fail = maybeFail('cp.reserveProvisioningStart');
+        if (fail) return fail;
+        const entry = reservations.get(tenantId) ?? { token: null, runId: null };
+        if (entry.token !== null) return { ok: true, winner: false };
+        // mirrors the revised RPC: a NEW reservation atomically clears any
+        // prior runId (a fresh token must never look like a stale run).
+        entry.token = reservationToken;
+        entry.runId = null;
+        reservations.set(tenantId, entry);
+        return { ok: true, winner: true };
+      },
+      async linkProvisioningRun(tenantId, reservationToken, runId) {
+        const fail = maybeFail('cp.linkProvisioningRun');
+        if (fail) return fail;
+        const entry = reservations.get(tenantId);
+        if (!entry || entry.token !== reservationToken) return { ok: true, linked: false };
+        entry.runId = runId;
+        return { ok: true, linked: true };
+      },
+      async releaseProvisioningReservation(tenantId, reservationToken) {
+        const fail = maybeFail('cp.releaseProvisioningReservation');
+        if (fail) return fail;
+        const entry = reservations.get(tenantId);
+        if (!entry || entry.token !== reservationToken) return { ok: true, released: false };
+        entry.token = null;
+        return { ok: true, released: true };
+      },
+      async readProvisioningReservation(tenantId) {
+        const fail = maybeFail('cp.readProvisioningReservation');
+        if (fail) return fail;
+        const entry = reservations.get(tenantId);
+        if (!entry) return { ok: true, reservationToken: null, runId: null };
+        return { ok: true, reservationToken: entry.token, runId: entry.runId };
+      },
       async findTenantBySlug(slug) {
-        const found = tenants.get(slug);
-        return found ? { ok: true, tenantId: found.id, resourceId: found.id } : { ok: false, reason: 'not found' };
+        const t = tenants.get(slug);
+        return t ? { ok: true, resourceId: t.id, tenantId: t.id, tenantStatus: (t as { status?: string | null }).status ?? null } : { ok: false, reason: 'not found' };
+      },
+      async findTenantById(tenantId) {
+        let foundSlug: string | undefined;
+        tenants.forEach((t, slug) => {
+          if (t.id === tenantId) foundSlug = slug;
+        });
+        if (foundSlug) return { ok: true, resourceId: tenantId, tenantId, slug: foundSlug };
+        return { ok: false, reason: 'not found' };
       },
       async findConfigByTenant(tenantId) {
+        const fail = maybeFail('cp.findConfigByTenant');
+        if (fail) return fail;
         const found = configs.get(tenantId);
         return found ? { ok: true, config: found, resourceId: tenantId } : { ok: false, reason: 'not found' };
       },
@@ -592,7 +748,22 @@ export function createFakeProviders(options: { failAt?: string[] } = {}): FakePr
       },
       async findRelease(tag) {
         const found = releases.get(tag);
-        return found ? { ok: true, release: found, resourceId: tag } : { ok: false, reason: 'not found' };
+        return found ? { ok: true, resourceId: tag, release: found } : { ok: false, reason: 'not found' };
+      },
+      async listLatestApprovedRelease() {
+        let latest: GoldenReleaseIdentity | undefined;
+        let latestApprovedAt = '';
+        releases.forEach((r) => {
+          if (r.status === 'approved' && (!r.approvedAt || r.approvedAt >= latestApprovedAt)) {
+            latestApprovedAt = r.approvedAt ?? '';
+            latest = r;
+          }
+        });
+        return latest ? { ok: true, resourceId: latest.tag, release: latest } : { ok: false, reason: 'no approved release' };
+      },
+      async getOperatorProfile(userId) {
+        const found = operatorProfiles.get(userId);
+        return found ? { ok: true, resourceId: userId, profile: found } : { ok: false, reason: 'not found' };
       },
     },
     health: {
@@ -614,21 +785,35 @@ export function createFakeProviders(options: { failAt?: string[] } = {}): FakePr
         lastConfiguredPlacesKey = rawPlacesKey; // fake keeps the last transient value for assertions
         return { ok: true, resourceId: projectId };
       },
+      async configureAppPass(projectId, rawAppPass) {
+        const fail = maybeFail('secrets.configureAppPass');
+        if (fail && 'reason' in fail) return { ok: false, reason: fail.reason };
+        const envMap = envOf(projectId);
+        if (envMap.has('APP_PASS')) return { ok: true, resourceId: projectId, appPassState: 'retained' }; // idempotent — never overwrite
+        if (!rawAppPass) return { ok: false, reason: 'OWNER ACTION REQUIRED: APP_PASS not configured' };
+        envMap.set('APP_PASS', { value: rawAppPass, encrypted: true });
+        return { ok: true, resourceId: projectId, appPassState: 'created' };
+      },
     },
     deviceLock: {
       async configureDeviceLock(projectId, secrets, tenantId) {
         const fail = maybeFail('deviceLock.configure');
         if (fail) return fail;
-        if (!secrets || !secrets.kvRestApiUrl || !secrets.kvRestApiToken || !secrets.appPass || !tenantId) {
+        if (!secrets || !secrets.kvRestApiUrl || !secrets.kvRestApiToken || !tenantId) {
           return { ok: false, reason: 'incomplete device-lock secrets' };
         }
-        lastDeviceLockSecrets = secrets; // test assertion only — executor never serializes it
-        deviceLockConfigured.set(projectId, { secrets, tenantId });
         const envMap = envOf(projectId);
+        // Cloud path: APP_PASS may already exist in the encrypted env (written by
+        // the start/bootstrap API) — never overwrite; raw may then be absent.
+        const appPass = secrets.appPass ?? (envMap.has('APP_PASS') ? envMap.get('APP_PASS')!.value : undefined);
+        if (!appPass) return { ok: false, reason: 'incomplete device-lock secrets (APP_PASS missing and env absent)' };
+        const full = { ...secrets, appPass };
+        lastDeviceLockSecrets = full; // test assertion only — executor never serializes it
+        deviceLockConfigured.set(projectId, { secrets: full, tenantId });
         envMap.set('KV_REST_API_URL', { value: secrets.kvRestApiUrl, encrypted: false });
         envMap.set('KV_REST_API_TOKEN', { value: secrets.kvRestApiToken, encrypted: true });
         envMap.set(KV_REST_API_TOKEN_FINGERPRINT_KEY, { value: aclTokenFingerprint(secrets.kvRestApiToken), encrypted: false });
-        envMap.set('APP_PASS', { value: secrets.appPass, encrypted: true });
+        envMap.set('APP_PASS', { value: appPass, encrypted: true });
         envMap.set('CUSTOMER_TENANT_ID', { value: tenantId, encrypted: false });
         return { ok: true, resourceId: projectId };
       },
@@ -643,6 +828,7 @@ export function createFakeProviders(options: { failAt?: string[] } = {}): FakePr
           tokenPresent,
           storeUrl: envMap.get('KV_REST_API_URL')?.value,
           tokenFingerprint: envMap.get('KV_REST_API_TOKEN_FINGERPRINT')?.value,
+          appPassPresent: envMap.has('APP_PASS'),
         };
       },
       async verifyDeviceLock(hostname) {
@@ -661,7 +847,7 @@ export function createFakeProviders(options: { failAt?: string[] } = {}): FakePr
       },
     },
     redisAcl: {
-      async gentoken(username) {
+      async gentoken() {
         const fail = maybeFail('redisAcl.gentoken');
         if (fail && fail.ok === false) throw new Error(fail.reason);
         return `gt-fake-${++aclGentokenCounter}`; // Upstash-style GENTOKEN bound to the user (fake, deterministic-unique)
@@ -700,9 +886,10 @@ export function createFakeProviders(options: { failAt?: string[] } = {}): FakePr
         if (usageSmokeFailHosts.has(hostname) || !configured) {
           return { ok: false, reason: 'usage smoke failed (deployment not configured)' };
         }
-        // 11th point (owner correction 2026-08-27): the SERVER-SIDE
+        // 11th point (owner-approved contract 2026-09-06): the SERVER-SIDE
         // referrer-acceptance PREFLIGHT needs the real key in the transient
-        // handoff — fail-closed before key capture/runtime handoff. Simulates
+        // handoff; absent key ⇒ probe REPORTED false (not a whole-run failure).
+        // Simulates
         // Google's referrer check: key present + not in the injected-failure
         // set ⇒ the exact origin is accepted.
         let referrerAcceptanceProbe = typeof placesApiKey === 'string' && placesApiKey.length > 0;

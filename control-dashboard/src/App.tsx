@@ -99,12 +99,8 @@ function Login({ onSignIn, onPreview, submitting, message }: {
     <section className="login-brand">
       <BrandMark />
       <div className="login-copy">
-        <span className="eyebrow">CUSTOMER CONTROL PLANE</span>
-        <h1>One standard.<br />Every customer isolated.</h1>
-        <p>Centralize management—not customer failure. Independent deployments, billing, secrets and rollback remain protected by design.</p>
-      </div>
-      <div className="architecture-strip">
-        <span><ShieldCheck size={18} /> Isolated runtime</span><span><PackageCheck size={18} /> Immutable releases</span><span><FileClock size={18} /> Full audit trail</span>
+        <h1>Customer Onboarding &amp; Management</h1>
+        <p>Create, provision and manage Lead Finder customer accounts.</p>
       </div>
     </section>
     <section className="login-panel">
@@ -123,8 +119,7 @@ function Login({ onSignIn, onPreview, submitting, message }: {
         {import.meta.env.DEV && <><div className="divider"><span>FOUNDATION PREVIEW</span></div>
         <button className="review-button" onClick={onPreview}>OPEN FOUNDATION REVIEW</button>
         <p className="review-note"><Database size={14} /> Preview mode uses sample data only. No production connection.</p></>}
-        <div className="auth-status"><span className="offline" /> SECURE OPERATOR SIGN-IN · SUPABASE AUTH</div>
-        <div className="auth-status"><span className="offline" /> FAIL-CLOSED ACCESS CONTROL · NO LOCAL BYPASS</div>
+        <div className="auth-status"><span className="offline" /> SECURE OPERATOR ACCESS</div>
       </div>
     </section>
   </main>;

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { runProvisioning } from './executor';
-import { createFakeProviders } from './provisioningProviders';
-import type { GoldenReleaseIdentity } from './releaseRegistry';
+import { runProvisioning } from './executor.js';
+import { createFakeProviders } from './provisioningProviders.js';
+import type { GoldenReleaseIdentity } from './releaseRegistry.js';
 
 const GOLDEN: GoldenReleaseIdentity = {
   version: '1.0.1',
@@ -36,8 +36,8 @@ function input(overrides: Record<string, unknown> = {}) {
     websiteRestrictionConfirmed: true,
     realPortalSmokeConfirmed: true,
     centralStoreUrl: 'https://central.example.com',
-    billingAccountId: '01B61E-759031-B494E4',
     wif: WIF,
+      bootstrapMember: 'admin@leadfinder.business',
     ...overrides,
   };
 }

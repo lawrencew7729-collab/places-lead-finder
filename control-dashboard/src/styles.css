@@ -73,4 +73,20 @@
 .run-sheet-skipped{opacity:.5}
 .run-sheet-skipped em{color:#82959d}
 .empty-panel{padding:26px;text-align:center;color:#647b84;font-size:12px}
+.staff-progress-card,.customer-portal-card,.finalizing-card{margin-top:18px;border:1px solid #1f3b45;border-radius:10px;background:#09161c;padding:16px}
+.staff-progress-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;color:#bcd0d6;font-size:12px;font-weight:700}
+.staff-progress-heading strong{color:var(--cyan);font:700 18px DM Mono,monospace}
+.staff-progress-track{height:9px;margin-top:12px;border-radius:999px;overflow:hidden;background:#14262e}
+.staff-progress-track span{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,var(--cyan2),var(--cyan));transition:width .35s ease}
+.staff-progress-card p{margin:10px 0 0;color:#6f8791;font-size:10px}
+.customer-portal-card small{display:block;color:#78909b;font:600 9px DM Mono,monospace;letter-spacing:.12em}
+.customer-portal-card code{display:block;margin:9px 0 13px;color:#b9e9e6;font:600 13px DM Mono,monospace;overflow-wrap:anywhere}
+.customer-portal-actions,.smoke-confirm-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.customer-portal-actions a{text-decoration:none}
+.smoke-confirm-row{margin-top:16px}
+.smoke-confirm-row>span{color:#78909b;font-size:10px}
+.status-refresh-button{border:1px solid #2a4650;background:#0a171d;color:#94aab1;border-radius:7px;padding:9px 12px;font:700 9px DM Mono,monospace;letter-spacing:.06em}
+.status-refresh-button:hover{border-color:var(--cyan);color:var(--cyan)}
+.finalizing-card{display:flex;flex-direction:column;gap:6px;border-color:rgba(244,185,66,.35);color:#d5b66f}
+.finalizing-card span{color:#8f9fa4;font-size:10px}
 @media(max-width:800px){.defaults-grid{grid-template-columns:1fr 1fr}.verify-list{grid-template-columns:1fr}.create-session-role{display:none}}

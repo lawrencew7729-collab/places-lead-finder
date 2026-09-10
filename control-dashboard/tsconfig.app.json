@@ -17,5 +17,10 @@
     "jsx": "react-jsx",
     "types": ["vite/client", "node", "vitest/globals", "@testing-library/jest-dom"]
   },
-  "include": ["src"]
+  "include": ["src", "api"],
+  "exclude": [
+    "workflows",
+    "api/lib/workflowRuntime.ts",
+    "api/provisioning"
+  ]
 }

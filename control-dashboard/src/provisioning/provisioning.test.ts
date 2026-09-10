@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { explicitProvisioningQuota, quotaSignal, verifyQuotaConsistency } from './quotaContract';
-import { refuseMissingRelease, RETIRED_MOCK_RELEASE, verifyGoldenRelease, type GoldenReleaseIdentity } from './releaseRegistry';
-import { runProvisioning, EXECUTION_GATE_REQUIRED } from './executor';
-import { createFakeProviders, customerMonitoringSaEmail, lastHandedOffDeviceLockSecrets, wifAudienceFor } from './provisioningProviders';
-import { aclUsernameFor } from './aclProvisioning';
+import { explicitProvisioningQuota, quotaSignal, verifyQuotaConsistency } from './quotaContract.js';
+import { refuseMissingRelease, RETIRED_MOCK_RELEASE, verifyGoldenRelease, type GoldenReleaseIdentity } from './releaseRegistry.js';
+import { runProvisioning, EXECUTION_GATE_REQUIRED } from './executor.js';
+import { createFakeProviders, customerMonitoringSaEmail, lastHandedOffDeviceLockSecrets, wifAudienceFor } from './provisioningProviders.js';
+import { aclUsernameFor } from './aclProvisioning.js';
 
 const GOLDEN: GoldenReleaseIdentity = {
   version: '1.0.1',
@@ -47,6 +47,7 @@ function input(overrides: Partial<Parameters<typeof runProvisioning>[1]> = {}) {
     centralStoreUrl: CENTRAL_STORE,
     billingAccountId: BILLING_ACCOUNT,
     wif: WIF,
+      bootstrapMember: 'admin@leadfinder.business',
     ...overrides,
   };
 }
@@ -133,14 +134,14 @@ describe('R1 Golden Standard registry', () => {
   });
 });
 
-describe('R1 provisioning executor (15-stage PRE-R1 model)', () => {
-  it('executes all 15 stages to CUSTOMER_READY with the approved contract', async () => {
+describe('R1 provisioning executor (16-stage model — 15 + bootstrap_cleanup)', () => {
+  it('executes all 16 stages (incl. bootstrap_cleanup) to CUSTOMER_READY with the approved contract', async () => {
     const providers = createFakeProviders();
     await registerGolden(providers);
     const result = await runProvisioning(providers, input(), transient());
     expect(result.outcome).toBe('CUSTOMER_READY');
     expect(result.failedStageId).toBeNull();
-    expect(result.stages).toHaveLength(15);
+    expect(result.stages).toHaveLength(16);
     expect(result.stages.every((s) => s.status === 'PASS')).toBe(true);
     expect(result.rollbackMetadata.resourceIds.vercel).toBe('prj_fake_abc');
     expect(result.rollbackMetadata.resourceIds.domain).toBe('abc.leadfinder.business');
@@ -189,15 +190,6 @@ describe('R1 provisioning executor (15-stage PRE-R1 model)', () => {
     expect(result.stages[0].detail).toContain('WIF config required');
   });
 
-  it('refuses an invalid billing account id at the tenant stage', async () => {
-    const providers = createFakeProviders();
-    await registerGolden(providers);
-    const result = await runProvisioning(providers, input({ billingAccountId: 'not-a-billing-id' }), transient());
-    expect(result.outcome).toBe('FAILED');
-    expect(result.failedStageId).toBe('tenant');
-    expect(result.stages[0].detail).toContain('billing account id required');
-  });
-
   it('orders env/secrets BEFORE the golden deploy (stage order contract)', async () => {
     const providers = createFakeProviders();
     await registerGolden(providers);
@@ -228,7 +220,8 @@ describe('R1 provisioning executor (15-stage PRE-R1 model)', () => {
     // stages after failure remain PENDING (no forward execution)
     expect(result.stages.slice(7).every((s) => s.status === 'PENDING')).toBe(true);
     expect(result.stages[12].id).toBe('device_lock');
-    expect(result.stages[14].id).toBe('finalize');
+    expect(result.stages[14].id).toBe('bootstrap_cleanup');
+    expect(result.stages[15].id).toBe('finalize');
   });
 
   it('retries only the failed stage and resumes (idempotent find-before-create)', async () => {
@@ -310,27 +303,42 @@ describe('R1 provisioning executor (15-stage PRE-R1 model)', () => {
     expect(good.ok).toBe(true);
   });
 
-  it('smoke requires the real API key: absent transient key → usage_smoke FAIL (owner correction)', async () => {
+  it('smoke requires the real API key on the DEV path: absent transient key + real smoke NOT yet confirmed → usage_smoke FAIL (owner correction)', async () => {
     const providers = createFakeProviders();
     await registerGolden(providers);
-    // first run: key captured + runtime handoff (env baked) → CUSTOMER_READY
-    const first = await runProvisioning(providers, input(), transient());
-    expect(first.outcome).toBe('CUSTOMER_READY');
-    // resume run WITHOUT the transient key (key env still present, but the
-    // referrer-acceptance preflight needs the real key in the handoff) → FAIL
-    const result = await runProvisioning(providers, input(), { deviceLockSecrets: transient().deviceLockSecrets });
+    const devInput = input({ realPortalSmokeConfirmed: false });
+    // first run: key captured + runtime handoff (env baked); preflight passes,
+    // then stops at the real-smoke OWNER ACTION gate.
+    const first = await runProvisioning(providers, devInput, transient());
+    expect(first.outcome).toBe('FAILED');
+    expect(first.failedStageId).toBe('usage_smoke');
+    // resume run WITHOUT the transient key while real smoke is STILL not
+    // confirmed → no raw key = cloud-path semantics: preflight not applicable,
+    // the run must stop at the real-smoke OWNER ACTION gate (never readiness).
+    const result = await runProvisioning(providers, devInput, { deviceLockSecrets: transient().deviceLockSecrets });
     expect(result.outcome).toBe('FAILED');
     expect(result.failedStageId).toBe('usage_smoke');
-    expect(result.stages.find((s) => s.id === 'usage_smoke')?.detail).toContain('referrer-acceptance preflight did not pass');
+    expect(result.stages.find((s) => s.id === 'usage_smoke')?.detail).toContain('OWNER ACTION REQUIRED');
   });
 
-  it('referrer-denied preflight (incompatible/mismatched restriction behavior) → FAIL at usage_smoke', async () => {
+  it('referrer-denied preflight (incompatible/mismatched restriction behavior) → FAIL at usage_smoke while real smoke unconfirmed', async () => {
     const providers = createFakeProviders();
     await registerGolden(providers);
     providers.setFailures(['usageSmoke.places']); // simulates REQUEST_DENIED (restriction not configured/mismatched)
-    const result = await runProvisioning(providers, input(), transient());
+    const result = await runProvisioning(providers, input({ realPortalSmokeConfirmed: false }), transient());
     expect(result.outcome).toBe('FAILED');
     expect(result.failedStageId).toBe('usage_smoke');
+  });
+
+  it('cloud path: real smoke confirmed by operator → referrer preflight not required (no raw key available) — smoke passes on the 10 HTTP points', async () => {
+    const providers = createFakeProviders();
+    await registerGolden(providers);
+    // full provision with raw key first (writes envs) — then cloud resume with
+    // NO raw key at all (both secrets absent) and smoke confirmed → READY.
+    const first = await runProvisioning(providers, input(), transient());
+    expect(first.outcome).toBe('CUSTOMER_READY');
+    const cloud = await runProvisioning(providers, input(), {});
+    expect(cloud.outcome).toBe('CUSTOMER_READY');
   });
 
   it('smoke success cannot bypass a missing restriction confirmation (stage 9 HOLD first)', async () => {
@@ -502,3 +510,64 @@ describe('R1 provisioning executor (15-stage PRE-R1 model)', () => {
     expect(providers.__getTenantStatus(input().slug)).toBe('active');
   });
 });
+
+  it('Verify 5: validate/finalize re-run REUSES the deploy-phase READY deployment (deployGolden called exactly once)', async () => {
+    const providers = createFakeProviders();
+    await providers.controlPlane.insertRelease(GOLDEN as never);
+    let deployPosts = 0;
+    const origDeploy = providers.vercel.deployGolden.bind(providers.vercel);
+    providers.vercel.deployGolden = (async (...a: never[]) => { deployPosts += 1; return origDeploy(...(a as [never, never])); }) as never;
+    const first = await runProvisioning(providers, input() as never, { placesApiKey: 'AIzaSyA_TEST_KEY_0000000000000000000000', deviceLockSecrets: { appPass: 'correct-horse-battery-staple' } } as never, {} as never);
+    expect(first.outcome).toBe('CUSTOMER_READY');
+    const deploymentId = first.stages.find((s2) => s2.id === 'deploy')?.detail || first.rollbackMetadata;
+    expect(deployPosts).toBe(1);
+    const rerun = await runProvisioning(providers, input({ existingDeploymentId: String(deploymentId || 'dpl_x') }) as never, { placesApiKey: 'AIzaSyA_TEST_KEY_0000000000000000000000', deviceLockSecrets: { appPass: 'correct-horse-battery-staple' } } as never, {} as never);
+    expect(rerun.outcome).toBe('CUSTOMER_READY');
+    expect(deployPosts).toBe(1); // STILL one deployment for one logical provisioning
+  });
+
+  it('usage_smoke: raw key PRESENT but referrer probe denied → STILL fail-closed (CLI/dev protection preserved)', async () => {
+    const providers = createFakeProviders();
+    providers.usageSmoke!.run = async () => ({
+      ok: true,
+      resourceId: 'x',
+      smoke: {
+        domainHealthy: true, usageStructured: true, capIs1000: true, safetyStopIs900: true,
+        maxSessionIs50: true, monitoringSource: true, deviceProbeLocked: true,
+        tenantIdentityExact: true, noActiveLeaseAfterRelease: true,
+        referrerAcceptanceProbe: false,
+      },
+    });
+    await providers.controlPlane.insertRelease(GOLDEN as never);
+    const result = await runProvisioning(providers, input({ realPortalSmokeConfirmed: false }), { placesApiKey: RAW_KEY, deviceLockSecrets: { appPass: APP_PASS } }, {});
+    expect(result.outcome).toBe('FAILED');
+    const stage = result.stages.find((st) => st.id === 'usage_smoke');
+    expect(String(stage?.detail)).toContain('referrer-acceptance preflight did not pass');
+  });
+
+  it('usage_smoke: cloud path with NO raw key does not fail on the probe — reaches the real-smoke hold instead', async () => {
+    const providers = createFakeProviders();
+    providers.usageSmoke!.run = async () => ({
+      ok: true,
+      resourceId: 'x',
+      smoke: {
+        domainHealthy: true, usageStructured: true, capIs1000: true, safetyStopIs900: true,
+        maxSessionIs50: true, monitoringSource: true, deviceProbeLocked: true,
+        tenantIdentityExact: true, noActiveLeaseAfterRelease: true,
+        referrerAcceptanceProbe: false,
+      },
+    });
+    await providers.controlPlane.insertRelease(GOLDEN as never);
+    // CLOUD RESUME CONTRACT: secure-start wrote the Places key to the CUSTOMER
+    // VERCEL PROJECT env (configurePlacesKey stores under /v9/projects/{vercel
+    // projectId}/env). Fake contract: vercel project id = prj_fake_<slug>
+    // (createProject) — NOT the Google project id. Seeding the same namespace
+    // the later cloud run reads is what makes Stage 5 skip idempotently.
+    const preSeed = await providers.secrets!.configurePlacesKey('prj_fake_abc', RAW_KEY);
+    expect(preSeed.ok).toBe(true);
+    const result = await runProvisioning(providers, input({ realPortalSmokeConfirmed: false }), { deviceLockSecrets: { appPass: APP_PASS } }, {});
+    expect(result.outcome).toBe('FAILED');
+    const stage = result.stages.find((st) => st.id === 'usage_smoke');
+    expect(String(stage?.detail)).toContain('OWNER ACTION REQUIRED');
+    expect(String(stage?.detail)).not.toContain('referrer');
+  });

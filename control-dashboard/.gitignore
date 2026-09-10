@@ -10,3 +10,10 @@ review-artifacts/
 *.tsbuildinfo
 vite.config.js
 vite.config.d.ts
+/.swc
+
+.vercel
+.env*
+
+.well-known/
+.workflow-data/

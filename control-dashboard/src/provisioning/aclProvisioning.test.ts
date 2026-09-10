@@ -10,7 +10,7 @@ import {
   provisionTenantAclWithRollback,
   revokeTenantAcl,
   type RedisAclAdmin,
-} from './aclProvisioning';
+} from './aclProvisioning.js';
 
 const TENANT_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const TENANT_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
