@@ -116,6 +116,8 @@ function enterApp() {
  * customer-side control action here: STOP / RESUME / UPGRADE_TO_FULL_900 are
  * Staff actions on the Dashboard and are enforced server-side in /api/usage.
  */
+let liveSearchStop = null;   // v1.0.11: the ONLY stop value shown to customers
+
 function applyPackageState(j) {
   if (!j) return;
   const LABEL = { STARTER_500: 'Starter 500', FULL_900: 'Full 900' };
@@ -129,6 +131,13 @@ function applyPackageState(j) {
     status.className = j.serviceStatus === 'STOPPED' ? 'text-amber-300 font-bold' : 'text-emerald-300 font-bold';
   }
   if (stop) stop.textContent = j.searchStop === undefined || j.searchStop === null ? '—' : String(j.searchStop);
+  // The internal Google ceiling (1000) is never customer-facing: every quota
+  // display is driven by this package search stop. Set it BEFORE any early return.
+  const liveStop = Number(j.searchStop);
+  if (Number.isFinite(liveStop) && liveStop > 0) {
+    liveSearchStop = liveStop;
+    updateBudgetUI();
+  }
   if (reason) {
     if (j.serviceStatus === 'STOPPED') {
       reason.textContent = '⚠ SERVICE STOPPED — SEARCH UNAVAILABLE · PORTAL STILL AVAILABLE · CONTACT SUPPORT';
@@ -321,7 +330,8 @@ function addUsage(n) {
 }
 /** Customer-facing stop value: the live package stop, else the legacy fallback. */
 function stopNumber() {
-  return liveSearchStop === null ? quota.redRequests : liveSearchStop;
+  // module scope has no `quota` binding (it is local to the callers) -> resolve it here
+  return liveSearchStop === null ? customerQuota().redRequests : liveSearchStop;
 }
 
 function updateBudgetUI() {
