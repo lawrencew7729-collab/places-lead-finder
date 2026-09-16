@@ -33,9 +33,13 @@
   .row-in { animation: fadeInRow .28s ease both; }
   @keyframes pulseDot { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
   @keyframes spinAnim { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-  .login-spin { animation: spinAnim 4s linear infinite; }
-  .login-spin-fast { animation: spinAnim 0.5s linear infinite; }
-  .splash-spin { animation: spinAnim 1.6s linear infinite; }
+  /* The brand mark is now a horizontal pin + LICX lockup. Rotating it would render the
+     wordmark upside-down and push its painted box over the login card's subtitle, so the
+     idle spin is dropped; the "unlocking" feedback is kept as a pulse (same class name,
+     so app.js's login-spin -> login-spin-fast swap keeps working). */
+  .login-spin { animation: none; }
+  .login-spin-fast { animation: barGlow 0.6s ease-in-out infinite; }
+  .splash-spin { animation: none; }
   .splash-fade { opacity: 0 !important; transition: opacity .45s ease !important; }
   .pulse { animation: pulseDot 1.7s ease-in-out infinite; }
   @keyframes barGlow { 0%,100% { filter: brightness(1); } 50% { filter: brightness(1.25); } }
