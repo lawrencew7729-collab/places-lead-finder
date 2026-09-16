@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createCustomerManagementHandler } from '../../api/lib/customerControl.js';
 import {
-  LEGACY_LABEL, UNAVAILABLE_LABEL, classifyPortalProbe, buildCustomerRow, limitStatusOf, buildAuditEvent,
+  LEGACY_LABEL, UNAVAILABLE_LABEL, classifyPortalProbe, classifyPortal, versionFromCommit, buildCustomerRow, limitStatusOf, buildAuditEvent,
 } from '../../src/staff/customerControlContract.js';
 
 const TENANTS = [
@@ -34,12 +34,47 @@ const get = () => new Request('https://dashboard.leadfinder.business/api/staff/c
 const post = (body: unknown) => new Request('https://dashboard.leadfinder.business/api/staff/customerControl', { method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } });
 
 describe('OWNER RULE 1 — LEGACY only on positive proof; faults are UNAVAILABLE', () => {
-  it('404 from the control endpoint = confirmed v1.0.10 -> LEGACY', async () => {
+  it('a BARE 404 is NOT legacy — it may be a broken v1.0.11 route -> UNAVAILABLE', async () => {
     const { deps: d } = deps({ probePortal: vi.fn(async () => ({ status: 404, body: null })) });
     const res = await createCustomerManagementHandler(d)(get());
     const body = (await res.json()) as { rows: Array<Record<string, unknown>> };
     expect(res.status).toBe(200);
+    expect(body.rows.every((r) => r.state === 'UNAVAILABLE' && r.notice === UNAVAILABLE_LABEL)).toBe(true);
+    expect(body.rows.some((r) => r.state === 'LEGACY')).toBe(false);
+    expect(body.rows.every((r) => r.portalVersion === null && r.actionsEnabled === false)).toBe(true);
+  });
+
+  it('LEGACY requires POSITIVE proof that the deployment is v1.0.10', async () => {
+    const { deps: d } = deps({
+      probePortal: vi.fn(async () => ({ status: 404, body: null })),
+      resolvePortalVersion: vi.fn(async () => '1.0.10'),
+    });
+    const body = (await (await createCustomerManagementHandler(d)(get())).json()) as { rows: Array<Record<string, unknown>> };
     expect(body.rows.every((r) => r.state === 'LEGACY' && r.notice === LEGACY_LABEL && r.actionsEnabled === false)).toBe(true);
+  });
+
+  it('a v1.0.11 deployment whose control route is broken stays UNAVAILABLE (proof says 1.0.11)', async () => {
+    const { deps: d } = deps({
+      probePortal: vi.fn(async () => ({ status: 404, body: null })),
+      resolvePortalVersion: vi.fn(async () => '1.0.11'),
+    });
+    const body = (await (await createCustomerManagementHandler(d)(get())).json()) as { rows: Array<Record<string, unknown>> };
+    expect(body.rows.every((r) => r.state === 'UNAVAILABLE')).toBe(true);
+  });
+
+  it('a healthy control endpoint WINS over version proof (live proof)', async () => {
+    const { deps: d } = deps({ probePortal: vi.fn(async () => okState()), resolvePortalVersion: vi.fn(async () => '1.0.10') });
+    const body = (await (await createCustomerManagementHandler(d)(get())).json()) as { rows: Array<Record<string, unknown>> };
+    expect(body.rows[0]).toMatchObject({ state: 'V1_0_11', portalVersion: '1.0.11', actionsEnabled: true });
+  });
+
+  it('an unprovable version resolver failure never becomes legacy', async () => {
+    const { deps: d } = deps({
+      probePortal: vi.fn(async () => ({ status: 404, body: null })),
+      resolvePortalVersion: vi.fn(async () => { throw new Error('vercel api down'); }),
+    });
+    const body = (await (await createCustomerManagementHandler(d)(get())).json()) as { rows: Array<Record<string, unknown>> };
+    expect(body.rows.every((r) => r.state === 'UNAVAILABLE')).toBe(true);
   });
 
   it('timeout / offline / 5xx / OIDC error / malformed reply = UNAVAILABLE (never LEGACY)', async () => {
@@ -78,7 +113,15 @@ describe('OWNER RULE 1 — LEGACY only on positive proof; faults are UNAVAILABLE
   });
 
   it('classification + limit status unit rules', () => {
-    expect(classifyPortalProbe({ status: 404 }).state).toBe('LEGACY');
+    expect(classifyPortalProbe({ status: 404 }).state).toBe('UNAVAILABLE');        // bare 404 proves nothing
+    expect(classifyPortal({ probe: { status: 404 }, provenVersion: null }).state).toBe('UNAVAILABLE');
+    expect(classifyPortal({ probe: { status: 404 }, provenVersion: '1.0.10' }).state).toBe('LEGACY');
+    expect(classifyPortal({ probe: { error: 'timeout' }, provenVersion: '1.0.10' }).state).toBe('LEGACY');
+    expect(classifyPortal({ probe: { status: 200, body: { ok: true, state: { portalVersion: '1.0.11', package: 'FULL_900', serviceStatus: 'ACTIVE' } } }, provenVersion: null }).state).toBe('V1_0_11');
+    expect(versionFromCommit('9f924c9a91eb36ee7f8d0aa7d8571852e0c025bd')).toBe('1.0.10');
+    expect(versionFromCommit('9F924C9A91EB36EE7F8D0AA7D8571852E0C025BD')).toBe('1.0.10');
+    expect(versionFromCommit('deadbeef')).toBeNull();
+    expect(versionFromCommit(null)).toBeNull();
     expect(classifyPortalProbe({ error: 'x' }).state).toBe('UNAVAILABLE');
     expect(classifyPortalProbe({ status: 200, body: { ok: true } }).state).toBe('UNAVAILABLE');
     expect(limitStatusOf('STARTER_500', 'ACTIVE', 499)).toBe('OK');

@@ -18,6 +18,12 @@ export interface CustomerManagementDeps {
   listTenants: () => Promise<Array<{ tenantId: string; company: string; subdomain: string }>>;
   /** authenticated STATUS read of one portal (never mutates) */
   probePortal: (subdomain: string, token: string) => Promise<PortalProbe>;
+  /**
+   * POSITIVE version proof for a portal without a working control endpoint
+   * (deployment identity -> known portal version). Absent/unknown => no proof,
+   * and a bare 404 must then be reported as UNAVAILABLE, never LEGACY.
+   */
+  resolvePortalVersion?: (subdomain: string) => Promise<string | null>;
   /** authenticated control call of one portal */
   callPortal: (subdomain: string, action: StaffAction, token: string) => Promise<PortalProbe>;
   /** existing audit primitive: public.write_user_audit_event */
@@ -60,7 +66,15 @@ export function createCustomerManagementHandler(deps: CustomerManagementDeps) {
         } catch (e) {
           probe = { error: String((e && (e as Error).message) || e) };
         }
-        rows.push(buildCustomerRow({ ...t, probe }));
+        let provenVersion: string | null = null;
+        if (deps.resolvePortalVersion) {
+          try {
+            provenVersion = await deps.resolvePortalVersion(t.subdomain);
+          } catch (e) {
+            provenVersion = null;   // unprovable version is never treated as legacy
+          }
+        }
+        rows.push(buildCustomerRow({ ...t, probe, provenVersion }));
       }
       return json({ ok: true, rows });
     }

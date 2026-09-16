@@ -4,10 +4,12 @@
  * Staff act through the Dashboard; the customer portal is the ONLY authority
  * for its own package/service state (stored in that customer's own Redis).
  *
- * OWNER RULE 1 — classification must never confuse a fault with legacy:
- *   LEGACY      ONLY when the portal POSITIVELY proves it is v1.0.10, i.e. the
- *               control endpoint does not exist (HTTP 404).
- *   UNAVAILABLE for every timeout / 5xx / OIDC error / offline / malformed reply.
+ * OWNER RULE 1 (revised) — never turn a fault into "legacy":
+ *   LEGACY      ONLY with POSITIVE proof that the portal is v1.0.10
+ *               (deployment identity resolves to the known v1.0.10 commit).
+ *   UNAVAILABLE for a bare 404 (could be a broken v1.0.11 route/deployment),
+ *               timeout, 401/OIDC error, 5xx, offline, malformed reply, or an
+ *               unknown/underivable version.
  *
  * OWNER RULE 2 — every staff mutation must leave an audit record.
  */
@@ -28,6 +30,20 @@ export const PACKAGE_LABELS: Record<PackageId, string> = {
   FULL_900: 'Full 900',
 };
 
+/**
+ * Known customer-portal versions by commit SHA. This is the ONLY positive
+ * version proof available for a portal that has no control endpoint yet
+ * (v1.0.10). Extend it when a new portal Golden is released.
+ */
+export const KNOWN_PORTAL_VERSIONS: Record<string, string> = {
+  '9f924c9a91eb36ee7f8d0aa7d8571852e0c025bd': '1.0.10',
+};
+
+export function versionFromCommit(commitSha?: string | null): string | null {
+  if (!commitSha) return null;
+  return KNOWN_PORTAL_VERSIONS[commitSha.trim().toLowerCase()] ?? null;
+}
+
 export interface PortalProbe {
   status?: number;
   body?: unknown;
@@ -41,11 +57,15 @@ export interface PortalClassification {
   reason: string;
 }
 
-/** Rule 1. A 404 is the ONLY positive proof of a v1.0.10 portal. */
+/** Transport/shape classification only — this NEVER returns LEGACY. */
 export function classifyPortalProbe(probe: PortalProbe): PortalClassification {
   if (probe.error) return { state: 'UNAVAILABLE', label: UNAVAILABLE_LABEL, reason: 'transport:' + probe.error };
   const status = probe.status ?? 0;
-  if (status === 404) return { state: 'LEGACY', label: LEGACY_LABEL, reason: 'control_endpoint_absent' };
+  if (status === 404) {
+    // A 404 alone proves NOTHING: the control route may simply be broken on a
+    // current portal. Positive version proof is required (see classifyPortal).
+    return { state: 'UNAVAILABLE', label: UNAVAILABLE_LABEL, reason: 'control_endpoint_absent_without_version_proof' };
+  }
   if (status === 200) {
     const body = probe.body as { ok?: unknown; state?: { package?: unknown; serviceStatus?: unknown; portalVersion?: unknown } } | undefined;
     const st = body?.state;
@@ -55,6 +75,19 @@ export function classifyPortalProbe(probe: PortalProbe): PortalClassification {
     return { state: 'UNAVAILABLE', label: UNAVAILABLE_LABEL, reason: 'malformed_state' };
   }
   return { state: 'UNAVAILABLE', label: UNAVAILABLE_LABEL, reason: 'http_' + status };
+}
+
+/** Full classification: live proof first, then positive version proof. */
+export function classifyPortal(input: { probe: PortalProbe; provenVersion?: string | null }): PortalClassification {
+  const live = classifyPortalProbe(input.probe);
+  if (live.state === 'V1_0_11') return live;
+  const proven = input.provenVersion ?? null;
+  if (proven === '1.0.10') return { state: 'LEGACY', label: LEGACY_LABEL, reason: 'proven_version_1.0.10' };
+  return {
+    state: 'UNAVAILABLE',
+    label: UNAVAILABLE_LABEL,
+    reason: proven ? 'version_' + proven + ':' + live.reason : 'no_version_proof:' + live.reason,
+  };
 }
 
 export type LimitStatus = 'OK' | 'LIMIT REACHED' | 'STOPPED' | 'UNKNOWN';
@@ -88,8 +121,9 @@ export function buildCustomerRow(input: {
   company: string;
   subdomain: string;
   probe: PortalProbe;
+  provenVersion?: string | null;
 }): CustomerRow {
-  const cls = classifyPortalProbe(input.probe);
+  const cls = classifyPortal({ probe: input.probe, provenVersion: input.provenVersion });
   const base = {
     tenantId: input.tenantId,
     company: input.company,
