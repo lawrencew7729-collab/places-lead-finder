@@ -39,7 +39,7 @@ function portalOrigin(subdomain: string) {
   return 'https://' + subdomain.replace(/^https?:\/\//, '').replace(/\/$/, '');
 }
 
-async function portalCall(subdomain: string, token: string, body?: { action: StaffAction }, timeoutMs = 8000) {
+async function portalCall(subdomain: string, token: string, body?: { action: StaffAction | 'STATUS' }, timeoutMs = 8000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
