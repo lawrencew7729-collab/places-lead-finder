@@ -105,8 +105,43 @@ function enterApp() {
     .then((r) => (r.ok ? r.json() : null))
     .then((j) => {
       if (j && typeof j.used === 'number' && Number.isFinite(j.used)) { liveUsage = j.used; updateBudgetUI(); }
+      applyPackageState(j);
     })
     .catch(() => { /* keep local fallback — display degrade only */ });
+}
+
+/**
+ * v1.0.11 — DISPLAY-ONLY package/service state.
+ * Package, service status and the reason search is unavailable. There is NO
+ * customer-side control action here: STOP / RESUME / UPGRADE_TO_FULL_900 are
+ * Staff actions on the Dashboard and are enforced server-side in /api/usage.
+ */
+function applyPackageState(j) {
+  if (!j) return;
+  const LABEL = { STARTER_500: 'Starter 500', FULL_900: 'Full 900' };
+  const name = document.getElementById('pkg-name');
+  const status = document.getElementById('pkg-status');
+  const stop = document.getElementById('pkg-stop');
+  const reason = document.getElementById('pkg-reason');
+  if (name) name.textContent = LABEL[j.package] || j.package || '—';
+  if (status) {
+    status.textContent = j.serviceStatus === 'STOPPED' ? 'STOPPED' : 'ACTIVE';
+    status.className = j.serviceStatus === 'STOPPED' ? 'text-amber-300 font-bold' : 'text-emerald-300 font-bold';
+  }
+  if (stop) stop.textContent = j.searchStop === undefined || j.searchStop === null ? '—' : String(j.searchStop);
+  if (reason) {
+    if (j.serviceStatus === 'STOPPED') {
+      reason.textContent = '⚠ SERVICE STOPPED — SEARCH UNAVAILABLE · PORTAL STILL AVAILABLE · CONTACT SUPPORT';
+    } else if (j.blockReason === 'PACKAGE_LIMIT_REACHED') {
+      reason.textContent = '⚠ PACKAGE LIMIT REACHED (' + (j.searchStop ?? '') + ') — CONTACT SUPPORT TO UPGRADE';
+    } else if (j.blockReason === 'SAFETY_STOP') {
+      reason.textContent = '⚠ MONTHLY SAFETY STOP REACHED — SEARCH UNAVAILABLE UNTIL RESET';
+    } else {
+      reason.classList.add('hidden');
+      return;
+    }
+    reason.classList.remove('hidden');
+  }
 }
 
 function showLogin(reason) {

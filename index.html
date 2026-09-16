@@ -188,6 +188,10 @@
       <div id="budget-bar" class="h-full rounded-full bar-glow transition-all duration-500" style="width:0%; background:linear-gradient(90deg,#0ABAB5,#67E8F9); box-shadow:0 0 14px rgba(10,186,181,0.6);"></div>
     </div>
     <p class="mono text-[10px] text-slate-600 mt-2.5">LIVE = GOOGLE MONITORING (REAL USAGE, ~2-5 MIN DELAY) · APP-LOCAL = THIS BROWSER ONLY · <span id="budget-auto-stop">AUTO-STOPS AT 900</span></p>
+    <!-- v1.0.11 package/service state — DISPLAY ONLY. Stop/Resume/Upgrade live in
+         the Staff Dashboard; the customer portal exposes no control action. -->
+    <p class="mono text-[10px] text-slate-600 mt-2.5">PACKAGE: <span id="pkg-name" class="text-slate-400">—</span> · SERVICE: <span id="pkg-status" class="text-slate-400">—</span> · SEARCH STOPS AT <span id="pkg-stop" class="text-slate-400">—</span></p>
+    <p id="pkg-reason" class="mono text-[11px] font-bold text-amber-300 mt-2 hidden"></p>
   </section>
 
   <!-- ===== Card 3: Result Stream ===== -->
