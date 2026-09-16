@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createCustomerManagementHandler } from '../../api/lib/customerControl.js';
 import {
   LEGACY_LABEL, UNAVAILABLE_LABEL, classifyPortalProbe, classifyPortal, versionFromCommit, buildCustomerRow, limitStatusOf, buildAuditEvent,
+  customerSlugFromSubdomain, customerProjectName, chooseProductionCommit,
 } from '../../src/staff/customerControlContract.js';
 
 const TENANTS = [
@@ -110,6 +111,20 @@ describe('OWNER RULE 1 — LEGACY only on positive proof; faults are UNAVAILABLE
       package: 'STARTER_500', packageLabel: 'Starter 500', usage: 510, serviceStatus: 'ACTIVE',
       limitStatus: 'LIMIT REACHED', state: 'V1_0_11', actionsEnabled: true, notice: null,
     });
+  });
+
+  it('version proof helpers: slug/project naming + latest PRODUCTION commit only', () => {
+    expect(customerSlugFromSubdomain('andrew.leadfinder.business')).toBe('andrew');
+    expect(customerSlugFromSubdomain('https://radiant.leadfinder.business/')).toBe('radiant');
+    expect(customerProjectName('andrew.leadfinder.business')).toBe('lf-customer-andrew');
+    expect(chooseProductionCommit([
+      { target: 'preview', meta: { githubCommitSha: 'deadbeefdeadbeef' } },
+      { target: 'production', meta: { githubCommitSha: '9f924c9a91eb36ee7f8d0aa7d8571852e0c025bd' } },
+    ])).toBe('9f924c9a91eb36ee7f8d0aa7d8571852e0c025bd');
+    expect(chooseProductionCommit([{ target: 'preview', meta: { githubCommitSha: 'x'.repeat(40) } }])).toBeNull();
+    expect(chooseProductionCommit(null)).toBeNull();
+    expect(chooseProductionCommit([{ target: 'production' }])).toBeNull();
+    expect(chooseProductionCommit([{ target: 'production', meta: { githubCommitSha: 'abc' } }])).toBeNull();  // too short
   });
 
   it('classification + limit status unit rules', () => {

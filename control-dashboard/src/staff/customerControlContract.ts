@@ -44,6 +44,31 @@ export function versionFromCommit(commitSha?: string | null): string | null {
   return KNOWN_PORTAL_VERSIONS[commitSha.trim().toLowerCase()] ?? null;
 }
 
+/** `andrew.leadfinder.business` -> `andrew` (the provisioning project slug). */
+export function customerSlugFromSubdomain(subdomain: string): string {
+  return String(subdomain || '').trim().toLowerCase().replace(/^https?:\/\//, '').split('.')[0];
+}
+
+/** The provisioning project name for a customer subdomain. */
+export function customerProjectName(subdomain: string): string {
+  return 'lf-customer-' + customerSlugFromSubdomain(subdomain);
+}
+
+/**
+ * Latest PRODUCTION deployment commit of a customer project (read-only).
+ * Returns null when nothing usable is present — an unprovable version must
+ * never be upgraded to a "legacy" verdict.
+ */
+export function chooseProductionCommit(
+  deployments: Array<{ target?: string; meta?: { githubCommitSha?: string } }> | null | undefined,
+): string | null {
+  if (!Array.isArray(deployments)) return null;
+  const prod = deployments.filter((d) => d && d.target === 'production');
+  const first = prod[0] ?? null;
+  const sha = first?.meta?.githubCommitSha;
+  return typeof sha === 'string' && sha.length >= 7 ? sha : null;
+}
+
 export interface PortalProbe {
   status?: number;
   body?: unknown;

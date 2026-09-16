@@ -11,6 +11,8 @@
  */
 import { getVercelOidcToken } from '@vercel/oidc';
 import { createCustomerManagementHandler } from '../lib/customerControl.js';
+import { readCloudEnv } from '../../src/provisioning/cloudProvidersEnv.js';
+import { customerProjectName, chooseProductionCommit, versionFromCommit } from '../../src/staff/customerControlContract.js';
 import { vercelEntry } from '../lib/vercelWeb.js';
 import { authenticateRequest } from '../lib/session.js';
 import type { StaffAction } from '../../src/staff/customerControlContract.js';
@@ -58,6 +60,33 @@ async function portalCall(subdomain: string, token: string, body?: { action: Sta
   }
 }
 
+/**
+ * POSITIVE version proof for a portal, read-only, with the SAME credential the
+ * provisioning path already uses (`VERCEL_TEAM_TOKEN` / `VERCEL_TEAM_ID` from
+ * readCloudEnv). No new token, no new env var, no customer secret.
+ * Any failure (missing token, API error, unknown project, unknown SHA) => null,
+ * which the contract renders as UNAVAILABLE — never LEGACY.
+ */
+export async function resolvePortalVersion(subdomain: string): Promise<string | null> {
+  const cfg = readCloudEnv();
+  const team = encodeURIComponent(cfg.vercelTeamId);
+  const slug = customerProjectName(subdomain).replace('lf-customer-', '');
+  const listRes = await fetch(`https://api.vercel.com/v9/projects?teamId=${team}&search=${encodeURIComponent(slug)}`, {
+    headers: { Authorization: 'Bearer ' + cfg.vercelTeamToken },
+  });
+  if (!listRes.ok) return null;
+  const list = (await listRes.json()) as { projects?: Array<{ id?: string; name?: string }> };
+  const exact = (list.projects ?? []).find((p) => p.name === customerProjectName(subdomain));
+  if (!exact?.id) return null;
+  const depRes = await fetch(
+    `https://api.vercel.com/v6/deployments?projectId=${encodeURIComponent(exact.id)}&teamId=${team}&target=production&limit=5`,
+    { headers: { Authorization: 'Bearer ' + cfg.vercelTeamToken } },
+  );
+  if (!depRes.ok) return null;
+  const dep = (await depRes.json()) as { deployments?: Array<{ target?: string; meta?: { githubCommitSha?: string } }> };
+  return versionFromCommit(chooseProductionCommit(dep.deployments));
+}
+
 export default vercelEntry(async (req: Request) => {
   const handler = createCustomerManagementHandler({
     async authenticate(request) {
@@ -80,6 +109,13 @@ export default vercelEntry(async (req: Request) => {
     probePortal: (subdomain, token) => portalCall(subdomain, token, { action: 'STATUS' }),
     callPortal: (subdomain, action, token) => portalCall(subdomain, token, { action }),
     mintOidcToken: () => getVercelOidcToken(),
+    async resolvePortalVersion(subdomain: string) {
+      try {
+        return await resolvePortalVersion(subdomain);
+      } catch (e) {
+        return null;   // token error / API failure => unprovable, never legacy
+      }
+    },
     async writeAudit(params) {
       const res = await rest('rpc/write_user_audit_event', { method: 'POST', body: JSON.stringify(params) });
       return res.status >= 200 && res.status < 300 ? { ok: true } : { ok: false, reason: 'rpc_' + res.status };
