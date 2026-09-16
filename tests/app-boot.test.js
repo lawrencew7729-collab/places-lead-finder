@@ -40,5 +40,9 @@ describe('customer portal boot', () => {
     expect(typeof window.doLogin).toBe('function');
     // the quota display must be driven by a DECLARED stop value
     expect(src).toMatch(/let liveSearchStop\s*=/);
+    // unknown must render as an em dash, never as an internal 900
+    expect(src).toMatch(/function stopText\(\)/);
+    expect(src).not.toMatch(/stopNumber\(\)\.toLocaleString/);
+    expect(src).not.toMatch(/liveSearchStop === null \? quota/);
   });
 });

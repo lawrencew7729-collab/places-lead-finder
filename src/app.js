@@ -329,23 +329,30 @@ function addUsage(n) {
   updateBudgetUI();
 }
 /** Customer-facing stop value: the live package stop, else the legacy fallback. */
+/** The customer-facing search stop, or null when the portal status has not arrived.
+ *  NEVER fall back to an internal/legacy number: showing 900 to a Starter customer
+ *  would be a lie. Unknown is displayed as an em dash. */
 function stopNumber() {
-  // module scope has no `quota` binding (it is local to the callers) -> resolve it here
-  return liveSearchStop === null ? customerQuota().redRequests : liveSearchStop;
+  return liveSearchStop;
+}
+
+function stopText() {
+  const n = stopNumber();
+  return n === null ? '—' : n.toLocaleString();
 }
 
 function updateBudgetUI() {
   const quota = customerQuota();
   const used = currentUsage(), pct = Math.min(100, Math.round(used / quota.monthlyTarget * 100));
   document.getElementById('budget-used').textContent = used.toLocaleString();
-  document.getElementById('budget-cap').textContent = stopNumber().toLocaleString();
-  document.getElementById('budget-auto-stop').textContent = 'AUTO-STOPS AT ' + stopNumber().toLocaleString();
-  document.getElementById('header-budget').textContent = used.toLocaleString() + '/' + stopNumber().toLocaleString();
-  document.getElementById('budget-pct').textContent = pct + '% · SEARCH STOP AT ' + stopNumber().toLocaleString() + ' · 50/SEARCH SESSION';
+  document.getElementById('budget-cap').textContent = stopText();
+  document.getElementById('budget-auto-stop').textContent = 'AUTO-STOPS AT ' + stopText();
+  document.getElementById('header-budget').textContent = used.toLocaleString() + '/' + stopText();
+  document.getElementById('budget-pct').textContent = pct + '% · SEARCH STOP AT ' + stopText() + ' · 50/SEARCH SESSION';
   const now = new Date();
   const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
   const daysLeft = Math.ceil((next - now) / 86400000);
-  document.getElementById('reset-info').textContent = 'PLACES REQUESTS USED · SEARCH STOP AT ' + stopNumber().toLocaleString() + ' · RESETS IN ' + daysLeft + 'D (UTC · 8AM MYT)';
+  document.getElementById('reset-info').textContent = 'PLACES REQUESTS USED · SEARCH STOP AT ' + stopText() + ' · RESETS IN ' + daysLeft + 'D (UTC · 8AM MYT)';
   const bar = document.getElementById('budget-bar');
   bar.style.width = pct + '%';
   bar.style.background = pct >= quota.redPercent ? 'linear-gradient(90deg,#dc2626,#ef4444)' : pct >= quota.amberPercent ? 'linear-gradient(90deg,#f4b942,#fbbf24)' : 'linear-gradient(90deg,#0ABAB5,#67E8F9)';
@@ -443,7 +450,7 @@ async function runSearch() {
     } else if (start.blocked) {
       showRunStatus(start.blockReason === 'SERVICE_STOPPED'
         ? '🛑 SERVICE STOPPED — SEARCH UNAVAILABLE · PORTAL STILL AVAILABLE · CONTACT SUPPORT'
-        : '🛑 SEARCH STOP AT ' + stopNumber().toLocaleString() + ' — NEW SEARCHES DISABLED (USED ' + (typeof start.used === 'number' ? start.used.toLocaleString() : '?') + '/' + stopNumber().toLocaleString() + ')');
+        : '🛑 SEARCH STOP AT ' + stopText() + ' — NEW SEARCHES DISABLED (USED ' + (typeof start.used === 'number' ? start.used.toLocaleString() : '?') + '/' + stopText() + ')');
     } else {
       showRunStatus('✖ USAGE CHECK FAILED — SEARCH BLOCKED (MONITORING/REDIS UNAVAILABLE)');
     }
