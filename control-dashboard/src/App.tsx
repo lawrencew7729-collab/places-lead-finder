@@ -40,12 +40,14 @@ import {
   subscribeToAuthChanges,
   type OperatorProfile,
 } from './supabase';
+import { CustomerManagementPage } from './CustomerManagementPage';
 
-type Page = 'overview' | 'customers' | 'releases' | 'health' | 'infrastructure' | 'audit';
+type Page = 'overview' | 'customers' | 'customerControl' | 'releases' | 'health' | 'infrastructure' | 'audit';
 
 const nav: Array<{ id: Page; label: string; icon: typeof LayoutDashboard }> = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
   { id: 'customers', label: 'Customers', icon: UsersRound },
+  { id: 'customerControl', label: 'Package Control', icon: ShieldCheck },
   { id: 'releases', label: 'Releases', icon: PackageCheck },
   { id: 'health', label: 'Health & Alerts', icon: HeartPulse },
   { id: 'infrastructure', label: 'Infrastructure', icon: ServerCog },
@@ -222,7 +224,8 @@ function Dashboard({ mode, profile, onLogout, onBackToCreate }: { mode: 'operato
   const tenants: RealTenantRow[] = productionMode
     ? realData.tenants
     : sampleTenants.map((tenant) => ({ id: tenant.id, companyName: tenant.companyName, slug: tenant.slug, exactSubdomain: tenant.exactSubdomain, status: tenant.status, createdAt: tenant.createdAt }));
-  const pageContent: ReactNode = page === 'overview'
+  const pageContent: ReactNode = page === 'customerControl' ? <CustomerManagementPage />
+    : page === 'overview'
     ? <Overview onNewCustomer={openWizard} infrastructureStatus={AUTHORITATIVE_INFRASTRUCTURE_STATUS} tenants={tenants} productionMode={productionMode}/>
     : page === 'customers'
       ? <Customers onNewCustomer={openWizard} localDraft={localDraft} tenants={tenants} productionMode={productionMode}/>
