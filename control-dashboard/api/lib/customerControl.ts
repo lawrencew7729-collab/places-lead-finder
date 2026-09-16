@@ -42,6 +42,7 @@ export function createCustomerManagementHandler(deps: CustomerManagementDeps) {
   return async function handler(req: Request): Promise<Response> {
     const auth = await deps.authenticate(req);
     if (!auth.ok) return json({ ok: false, error: auth.reason ?? 'UNAUTHENTICATED' }, 401);
+    if (!auth.userId) return json({ ok: false, error: 'NO_OPERATOR_IDENTITY' }, 401);
     if (!staffRoleAllowed(auth.role)) return json({ ok: false, error: 'UNAUTHORIZED_ROLE' }, 403);
 
     if (req.method === 'GET') {

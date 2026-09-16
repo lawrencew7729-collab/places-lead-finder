@@ -91,11 +91,17 @@ export default vercelEntry(async (req: Request) => {
   const handler = createCustomerManagementHandler({
     async authenticate(request) {
       const auth = await authenticateRequest(request, supabaseUrl());
-      if (!auth.ok || !auth.session) return { ok: false, reason: auth.reason ?? 'UNAUTHENTICATED' };
-      const userId = String((auth.session as { userId?: string; sub?: string }).userId ?? (auth.session as { sub?: string }).sub ?? '');
+      if (!auth.ok || !auth.session) return { ok: false, reason: 'UNAUTHENTICATED' };
+      // CONTRACT (api/lib/session.ts): VerifiedSession carries the authoritative
+      // operator id as `operatorUserId` (the verified Supabase `sub`). Reading
+      // `userId`/`sub` here yields '' and makes every staff request look INACTIVE.
+      const userId = String(auth.session.operatorUserId ?? '');
+      if (!userId) return { ok: false, reason: 'NO_OPERATOR_IDENTITY' };
       const profile = await rest('operator_profiles?select=role,active&user_id=eq.' + encodeURIComponent(userId) + '&limit=1');
+      if (profile.status < 200 || profile.status >= 300) return { ok: false, reason: 'PROFILE_LOOKUP_FAILED' };
       const row = Array.isArray(profile.json) ? (profile.json[0] as { role?: string; active?: boolean } | undefined) : undefined;
-      if (!row || row.active === false) return { ok: false, reason: 'INACTIVE' };
+      if (!row) return { ok: false, reason: 'PROFILE_NOT_FOUND' };
+      if (row.active === false) return { ok: false, reason: 'INACTIVE' };
       return { ok: true, userId, role: row.role };
     },
     async listTenants() {

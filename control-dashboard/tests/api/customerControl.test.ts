@@ -181,6 +181,13 @@ describe('OWNER RULE 2 — every staff action is audited', () => {
 });
 
 describe('permissions + action whitelist', () => {
+  it('an empty operator identity is rejected (regression: INACTIVE from a mis-read session field)', async () => {
+    const { deps: d } = deps({ authenticate: vi.fn(async () => ({ ok: true, userId: '', role: 'admin' })) });
+    const res = await createCustomerManagementHandler(d)(get());
+    expect(res.status).toBe(401);
+    expect((await res.json()) as unknown).toMatchObject({ ok: false, error: 'NO_OPERATOR_IDENTITY' });
+  });
+
   it('unauthenticated -> 401, non-staff role -> 403', async () => {
     const unauthed = deps({ authenticate: vi.fn(async () => ({ ok: false, reason: 'UNAUTHENTICATED' })) });
     expect((await createCustomerManagementHandler(unauthed.deps)(get())).status).toBe(401);
