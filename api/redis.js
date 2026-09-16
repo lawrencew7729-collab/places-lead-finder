@@ -10,8 +10,8 @@
 //   path segment.)
 //
 // Keys are always tenant-scoped: tenant:<TENANT_ID>:{devices,active_search,
-// usage:<YYYY-MM>} — enforced server-side AND by the per-tenant Redis ACL
-// keyspace (~tenant:<TENANT_ID>:* +get +set +del +incrby +expire +eval).
+// usage:<YYYY-MM>,config} — enforced server-side AND by the per-tenant Redis
+// ACL keyspace (~tenant:<TENANT_ID>:* +get +set +del +incrby +expire +eval).
 
 export function tenantDevicesKey(tenantId) {
   return `tenant:${tenantId}:devices`;
@@ -23,6 +23,15 @@ export function tenantActiveSearchKey(tenantId) {
 
 export function tenantUsageKey(tenantId, month) {
   return `tenant:${tenantId}:usage:${month}`;
+}
+
+/**
+ * v1.0.11 — authoritative package/service state for ONE customer.
+ * Written only by /api/control (OIDC-authenticated Dashboard call); read by
+ * /api/usage at search time. Same ACL namespace as the other tenant keys.
+ */
+export function tenantConfigKey(tenantId) {
+  return `tenant:${tenantId}:config`;
 }
 
 export function redisClient({ url, token, fetchImpl } = {}) {

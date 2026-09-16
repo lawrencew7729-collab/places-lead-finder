@@ -34,14 +34,23 @@ function scriptedFetch({ stsStatus = 200, stsBody = { access_token: 'fed-token-1
   return fn;
 }
 
-function memoryRedis({ usage = 0, lease = null } = {}) {
+function memoryRedis({ usage, lease, ...opts } = {}) {
   let usageV = usage;
   let leaseV = lease;
+  const pkg = opts.package ?? 'STARTER_500';
+  const serviceStatus = opts.serviceStatus ?? 'ACTIVE';
   const calls = [];
   return {
     redis: {
       configured: () => true,
-      get: async (k) => { calls.push(['get', k]); if (k.includes('usage')) return String(usageV); return leaseV; },
+      get: async (k) => {
+        calls.push(['get', k]);
+        // v1.0.11: authoritative package/service state (own Redis). Defaults to the
+        // new-customer default unless the test seeds a package explicitly.
+        if (k.includes(':config')) return JSON.stringify({ package: pkg, serviceStatus });
+        if (k.includes('usage')) return String(usageV);
+        return leaseV;
+      },
       set: async (k, v, ...opts) => {
         calls.push(['set', k, ...opts]);
         if (k.includes('active_search')) { if (opts.includes('NX') && leaseV) return null; leaseV = v; return 'OK'; }
@@ -72,7 +81,8 @@ function handlerWith({ fetchImpl, redis, oidcProvider = async () => 'oidc-token-
 describe('R1 v1.0.6 WIF two-stage auth (STS -> IAMCredentials -> Monitoring)', () => {
   it('STS request contains NO serviceAccount parameter; exchange -> generateAccessToken -> Monitoring uses the SA token', async () => {
     const fetchImpl = scriptedFetch();
-    const { redis } = memoryRedis();
+    // v1.0.11: the 900 safety stop is now the FULL_900 package stop.
+    const { redis } = memoryRedis({ package: 'FULL_900' });
     const res = fakeRes();
     await handlerWith({ fetchImpl, redis })({ query: { deviceId: 'dev-1' } }, res);
 
@@ -154,7 +164,7 @@ describe('R1 v1.0.6 WIF two-stage auth (STS -> IAMCredentials -> Monitoring)', (
   it('B2 reconcile floor + NX lease acquire + safety stop 900 on the RUN-start path', async () => {
     // Monitoring 899 (stale) + Redis 901 -> effective 901 -> RUN blocked
     const fetchImpl = scriptedFetch({ monBody: { timeSeries: [{ points: [{ value: { doubleValue: 899 } }] }] } });
-    const { redis } = memoryRedis({ usage: 901 });
+    const { redis } = memoryRedis({ usage: 901, package: 'FULL_900' });
     const res = fakeRes();
     await handlerWith({ fetchImpl, redis })({ query: {} }, res);
     expect(res.body.used).toBe(901);
@@ -164,11 +174,12 @@ describe('R1 v1.0.6 WIF two-stage auth (STS -> IAMCredentials -> Monitoring)', (
 
   it('B2 boundary: 899 usage -> RUN may start (lease acquired)', async () => {
     const fetchImpl = scriptedFetch({ monBody: { timeSeries: [{ points: [{ value: { doubleValue: 899 } }] }] } });
-    const { redis } = memoryRedis();
+    // v1.0.11: 899 is below the FULL_900 stop (and above the STARTER_500 stop).
+    const { redis } = memoryRedis({ package: 'FULL_900' });
     const res = fakeRes();
     await handlerWith({ fetchImpl, redis })({ query: {} }, res);
     expect(res.body.used).toBe(899);
-    expect(res.body.blocked).toBeUndefined();
+    expect(res.body.blocked).toBe(false);
     expect(res.body.locked).toBeUndefined();
     expect(res.body.sessionId).toBeTruthy();
     expect(res.body.safetyStop).toBe(900);
@@ -177,7 +188,7 @@ describe('R1 v1.0.6 WIF two-stage auth (STS -> IAMCredentials -> Monitoring)', (
 
   it('B2 boundary: 900 usage -> new RUN blocked', async () => {
     const fetchImpl = scriptedFetch({ monBody: { timeSeries: [{ points: [{ value: { doubleValue: 900 } }] }] } });
-    const { redis } = memoryRedis();
+    const { redis } = memoryRedis({ package: 'FULL_900' });
     const res = fakeRes();
     await handlerWith({ fetchImpl, redis })({ query: {} }, res);
     expect(res.body.used).toBe(900);

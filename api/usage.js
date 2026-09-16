@@ -9,9 +9,11 @@
 // Text Search Enterprise / billing-SKU usage.
 // ESM format (matches root package.json "type": "module").
 import { getVercelOidcToken } from '@vercel/oidc';
-import { redisClient, tenantActiveSearchKey, tenantUsageKey } from './redis.js';
+import { redisClient, tenantActiveSearchKey, tenantUsageKey, tenantConfigKey } from './redis.js';
 import { pacificBillingMonth, pacificBillingMonthStartUtc } from './billingMonth.js';
 import { SESSION_TTL_SECONDS, MAX_SESSION_REQUESTS } from './session.js';
+// v1.0.11 package/service contract — shared with /api/control (same pure module).
+import { parseTenantConfig, searchGate, publicState } from '../src/packageControl.js';
 
 const MONITORING_SCOPE = 'https://www.googleapis.com/auth/monitoring.read';
 // The STS federated token must carry cloud-platform: it is ONLY used to call
@@ -178,17 +180,51 @@ export function createUsageHandler(deps = {}) {
       // 3. atomic reconcile floor — usage can NEVER move backward.
       const reconciled = await redis.eval(RECONCILE_SCRIPT, [usageKey], [String(monitoringUsed)]);
       const effectiveStart = Math.max(monitoringUsed, Number(reconciled ?? monitoringUsed));
+      // 3c. v1.0.11 — authoritative package/service state for THIS customer,
+      //     read from THIS customer's own Redis at request time (the customer
+      //     runtime NEVER depends on the Control Dashboard being available).
+      //     Missing key → new-customer default (STARTER_500 / ACTIVE).
+      let tenantConfig;
+      try {
+        tenantConfig = parseTenantConfig(await redis.get(tenantConfigKey(tenantId)));
+      } catch (e) {
+        // FAIL CLOSED: an unreadable authoritative state must never silently
+        // disable service-stop / package enforcement.
+        return res.status(503).json({ error: 'state_unavailable', used: null, cap });
+      }
+      const gate = searchGate({
+        package: tenantConfig.package,
+        serviceStatus: tenantConfig.serviceStatus,
+        used: effectiveStart,
+      });
+      const baseState = {
+        used: effectiveStart,
+        cap,
+        safetyStop: gate.limit,
+        package: gate.package,
+        serviceStatus: gate.serviceStatus,
+        searchStop: gate.limit,
+        portalVersion: publicState({ package: gate.package, serviceStatus: gate.serviceStatus, used: effectiveStart, month, ceiling: cap }).portalVersion,
+        month,
+        blocked: !gate.allowed,
+        blockReason: gate.reason,
+      };
       // 3b. READ-ONLY peek (owner-approved 2026-09-03): portal entry/refresh
       //     usage display. Returns the shared Monitoring usage WITHOUT
       //     acquiring/renewing the active_search lease and WITHOUT creating a
       //     session or incrementing usage — repeated peeks must never lock.
       if (req.query && req.query.mode === 'peek') {
-        return res.json({ used: effectiveStart, cap, safetyStop: SAFETY_STOP, month, source: 'monitoring', peek: true });
+        return res.json({ ...baseState, source: 'monitoring', peek: true });
       }
-      // 4. SAFETY STOP: 900 blocks NEW top-level RUN (B2 owner decision 2026-08-27:
-      //    max app-originated traffic = 899 + 50 session = 949 < 1000 Enterprise cap).
+      // 4. ENFORCEMENT (server-side, authoritative — never UI-only):
+      //    service STOPPED, or package limit reached (STARTER_500 = 500 /
+      //    FULL_900 = 900). SAFETY_STOP below stays as an independent internal
+      //    ceiling (Google monthly ceiling remains 1000).
+      if (!gate.allowed) {
+        return res.json({ ...baseState, blocked: true });
+      }
       if (effectiveStart >= SAFETY_STOP) {
-        return res.json({ used: effectiveStart, cap, safetyStop: SAFETY_STOP, month, blocked: true });
+        return res.json({ ...baseState, blocked: true, blockReason: 'SAFETY_STOP' });
       }
       // 5. atomic exclusive lease acquire (NX).
       const sessionId = randomUuid();
@@ -201,14 +237,11 @@ export function createUsageHandler(deps = {}) {
       const acquired = await redis.set(leaseKey, lease, 'EX', String(SESSION_TTL_SECONDS), 'NX');
       if (acquired !== 'OK') {
         // 6. another device holds an active search lease.
-        return res.json({ used: effectiveStart, cap, safetyStop: SAFETY_STOP, month, locked: true });
+        return res.json({ ...baseState, locked: true });
       }
       // 7. return session context (server-side attempt count starts at 0).
       return res.json({
-        used: effectiveStart,
-        cap,
-        safetyStop: SAFETY_STOP,
-        month,
+        ...baseState,
         sessionId,
         maxSessionRequests: MAX_SESSION_REQUESTS,
         leaseTtlSeconds: SESSION_TTL_SECONDS,
