@@ -1,49 +1,33 @@
 /**
- * TEMPORARY one-off smoke route (owner-approved, retry 2026-09-16) — REMOVE AFTER USE.
+ * TEMPORARY one-off smoke route (owner-approved, retry#2 2026-09-16) — REMOVE AFTER USE.
  *
- * Proves the REAL production identity chain of lf-control-dashboard:
+ * Chain under test:
  *   production runtime -> getVercelOidcToken() -> POST https://lf-v1011-smoke.vercel.app/api/control
+ *   -> read the JSON BODY (the real Customer Management backend must do this) -> return a FIXED small JSON
  *
- * DIAGNOSTIC BUILD: staged trace + 8s hard AbortController timeout on the
- * outbound call, so a stall can never again return "nothing at all".
- * The OIDC token is NEVER returned, echoed or logged — only its presence flag.
- * The trace contains stage NAMES and an HTTP status; no headers, no token,
- * no token payload, no upstream body beyond the portal's non-secret state.
+ * The upstream body is NOT forwarded. The OIDC token is never returned, echoed or logged.
+ * Trace carries stage NAMES only (plus a body LENGTH), never token material.
  */
 import { getVercelOidcToken } from '@vercel/oidc';
 
 export const config = { runtime: 'nodejs' };
 
 const TARGET = 'https://lf-v1011-smoke.vercel.app/api/control';
-const UPSTREAM_TIMEOUT_MS = 8000;
+const FETCH_TIMEOUT_MS = 8000;
+const BODY_TIMEOUT_MS = 5000;
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
 }
 
-/** Safe error summary: name + first 80 chars of message, no token material. */
 function safeErr(e: unknown): string {
   const err = e as { name?: string; message?: string };
-  const msg = String(err?.message ?? e ?? 'unknown').slice(0, 80);
-  return (err?.name ?? 'Error') + ':' + msg;
-}
-
-function safeState(body: unknown) {
-  const st = (body as { state?: Record<string, unknown> } | null)?.state;
-  if (!st) return null;
-  return {
-    portalVersion: st.portalVersion ?? null,
-    package: st.package ?? null,
-    serviceStatus: st.serviceStatus ?? null,
-    usage: st.usage ?? null,
-    searchStop: st.searchStop ?? null,
-  };
+  return (err?.name ?? 'Error') + ':' + String(err?.message ?? e ?? 'unknown').slice(0, 80);
 }
 
 export default async function handler(req: Request): Promise<Response> {
   const trace: string[] = [];
   const step = (s: string) => { trace.push(s); console.log('[smokeOidc] ' + s); };
-
   step('route_enter');
 
   let token: string | undefined;
@@ -55,13 +39,10 @@ export default async function handler(req: Request): Promise<Response> {
     step('catch:oidc_mint_failed');
     return json({ pass: false, upstreamStatus: 0, trace, error: 'oidc_mint_failed:' + safeErr(e) });
   }
-  if (!token) {
-    step('catch:oidc_token_absent');
-    return json({ pass: false, upstreamStatus: 0, trace, error: 'oidc_token_absent' });
-  }
+  if (!token) return json({ pass: false, upstreamStatus: 0, trace, error: 'oidc_token_absent' });
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
+  const ac = new AbortController();
+  const acTimer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
   let upstream: Response;
   try {
     step('before_fetch_smoke');
@@ -69,30 +50,46 @@ export default async function handler(req: Request): Promise<Response> {
       method: 'POST',
       headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'STATUS' }),
-      signal: controller.signal,
+      signal: ac.signal,
     });
     step('after_fetch_smoke:' + upstream.status);
   } catch (e) {
-    clearTimeout(timer);
+    clearTimeout(acTimer);
     const aborted = (e as { name?: string })?.name === 'AbortError';
     step('catch:' + (aborted ? 'SMOKE_UPSTREAM_TIMEOUT' : 'smoke_fetch_failed'));
-    return json(
-      { pass: false, upstreamStatus: 0, trace, error: aborted ? 'SMOKE_UPSTREAM_TIMEOUT' : 'smoke_fetch_failed:' + safeErr(e) },
-      aborted ? 504 : 502,
-    );
+    return json({ pass: false, upstreamStatus: 0, trace, error: aborted ? 'SMOKE_UPSTREAM_TIMEOUT' : 'smoke_fetch_failed:' + safeErr(e) }, aborted ? 504 : 502);
   }
-  clearTimeout(timer);
+  clearTimeout(acTimer);
 
-  const text = await upstream.text();
-  let parsed: unknown = null;
-  try { parsed = text ? JSON.parse(text) : null; } catch { parsed = null; }
-  const ok = upstream.status === 200 && (parsed as { ok?: boolean } | null)?.ok === true;
-  step('done:ok=' + ok);
-  return json({
-    pass: ok,
-    upstreamStatus: upstream.status,
-    trace,
-    state: safeState(parsed),
-    error: ok ? null : ((parsed as { error?: string } | null)?.error ?? 'non_json_upstream'),
-  });
+  // BODY READ — the real Customer Management backend must be able to do this too.
+  let bodyLength = -1;
+  let ok = false;
+  let portalError: string | null = null;
+  try {
+    step('before_body_read');
+    const read = await Promise.race([
+      upstream.text().then((t) => ({ kind: 'text' as const, t })),
+      new Promise<{ kind: 'timeout' }>((res) => setTimeout(() => res({ kind: 'timeout' }), BODY_TIMEOUT_MS)),
+    ]);
+    if (read.kind === 'timeout') {
+      step('body_read_timeout');
+      return json({ pass: false, upstreamStatus: upstream.status, trace, error: 'BODY_READ_TIMEOUT' }, 504);
+    }
+    bodyLength = read.t.length;
+    step('after_body_read:length=' + bodyLength);
+    try {
+      const parsed = JSON.parse(read.t) as { ok?: boolean; error?: string };
+      ok = upstream.status === 200 && parsed?.ok === true;
+      portalError = ok ? null : (parsed?.error ?? 'non_json_upstream');
+    } catch {
+      portalError = 'body_not_json';
+    }
+  } catch (e) {
+    step('catch:body_read_failed');
+    return json({ pass: false, upstreamStatus: upstream.status, trace, error: 'body_read_failed:' + safeErr(e) }, 502);
+  }
+
+  step('done:pass=' + ok);
+  // FIXED small JSON — the upstream body is deliberately NOT forwarded.
+  return json({ pass: ok, upstreamStatus: upstream.status, bodyLength, trace, error: portalError });
 }
