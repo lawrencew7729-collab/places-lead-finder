@@ -49,6 +49,11 @@ export function createUsageTelemetry({ fetchImpl, now = () => Date.now() } = {})
       try {
         const r = await doFetch('/api/usage?deviceId=' + encodeURIComponent(deviceId || ''), { cache: 'no-store' });
         const j = await r.json().catch(() => ({}));
+        // v1.0.12 — a device whose slot was cleared on the Dashboard is revoked
+        // here, on its very next run (server-side device validation).
+        if (j && j.reason === 'DEVICE_NOT_AUTHORIZED') {
+          return { ok: false, blocked: true, deviceRevoked: true, error: 'DEVICE_NOT_AUTHORIZED', used, cap, safetyStop };
+        }
         if (!r.ok || j.error) return { ok: false, blocked: true, error: 'usage check failed' };
         cap = typeof j.cap === 'number' ? j.cap : cap;
         safetyStop = typeof j.safetyStop === 'number' ? j.safetyStop : safetyStop;

@@ -445,7 +445,10 @@ async function runSearch() {
   // blocks at >= 900, and atomically acquires the single active-search lease.
   const start = await telemetry.startRun(getDeviceId());
   if (!start.ok) {
-    if (start.locked) {
+    if (start.deviceRevoked) {
+      // v1.0.12 — server-side device validation: the slot was cleared by staff.
+      showRunStatus('🚫 THIS DEVICE IS NO LONGER AUTHORIZED — ACCESS REMOVED · CONTACT SUPPORT TO RE-REGISTER');
+    } else if (start.locked) {
       showRunStatus('🔒 ANOTHER AUTHORIZED DEVICE IS CURRENTLY SEARCHING. PLEASE CLOSE THE OTHER DEVICE TO CONTINUE.');
     } else if (start.blocked) {
       showRunStatus(start.blockReason === 'SERVICE_STOPPED'

@@ -33,7 +33,7 @@
    ============================================================ */
 import { redisClient, tenantDevicesKey } from './redis.js';
 
-const MAX_DEVICES = 2;          // 一账号 2 台设备
+export const MAX_DEVICES = 2;          // 一账号 2 台设备
 
 /** Immutable registry identity. Missing tenant id → fail closed. */
 function accountKey() {
@@ -151,3 +151,58 @@ export function createDeviceHandler(deps = {}) {
 }
 
 export default createDeviceHandler();
+
+/* ============================================================
+   v1.0.12 — STAFF-FACING device registry access (used by the
+   OIDC-pinned /api/control endpoint and by the search path).
+
+   The customer portal still has NO public release endpoint: clearing a slot is
+   an authenticated STAFF action on the Dashboard, and the search path now
+   validates the device on EVERY run so a cleared device is revoked immediately
+   (not only at its next portal load / login).
+   ============================================================ */
+
+/** Read the registry (never throws on shape). `configured: false` = no lock in use. */
+export async function loadDeviceRegistry(redis, tenantId) {
+  const key = tenantId ? tenantDevicesKey(tenantId) : null;
+  if (!key || !redis || !redis.configured()) return { configured: false, devices: [], maxDevices: MAX_DEVICES };
+  const rec = await kvGet(key, redis);
+  const raw = rec && Array.isArray(rec.devices) ? rec.devices : [];
+  const devices = raw.map((d, index) => ({
+    index,
+    id: String(d.id || ''),
+    label: String(d.label || ''),
+    firstSeen: Number.isFinite(Number(d.firstSeen)) ? Number(d.firstSeen) : null,
+    lastSeen: Number.isFinite(Number(d.lastSeen)) ? Number(d.lastSeen) : null,
+  }));
+  return { configured: true, devices, maxDevices: MAX_DEVICES };
+}
+
+/**
+ * TRUE when this device id holds a slot of this account. A tenant with an EMPTY
+ * registry has no lock in use yet → anything is allowed (first device registers
+ * through the normal login path). Missing device id is NEVER authorized once the
+ * lock is in use (fail closed).
+ */
+export async function isDeviceAuthorized(redis, tenantId, deviceId) {
+  const reg = await loadDeviceRegistry(redis, tenantId);
+  if (!reg.configured) return { configured: false, authorized: false };
+  if (!reg.devices.length) return { configured: true, authorized: true };
+  const id = String(deviceId || '');
+  return { configured: true, authorized: Boolean(id) && reg.devices.some((d) => d.id === id) };
+}
+
+/** Remove ONE slot: exact id first, else the index. Returns the removed device. */
+export async function removeDeviceSlot(redis, tenantId, { deviceId, deviceIndex } = {}) {
+  const key = tenantId ? tenantDevicesKey(tenantId) : null;
+  if (!key || !redis || !redis.configured()) return { ok: false, reason: 'kv_not_configured' };
+  const rec = (await kvGet(key, redis)) || { devices: [] };
+  const devs = Array.isArray(rec.devices) ? rec.devices : [];
+  let at = -1;
+  if (deviceId) at = devs.findIndex((d) => String(d.id) === String(deviceId));
+  else if (Number.isInteger(deviceIndex) && deviceIndex >= 0 && deviceIndex < devs.length) at = deviceIndex;
+  if (at < 0) return { ok: false, reason: 'device_not_found' };
+  const [removed] = devs.splice(at, 1);
+  await kvSet(key, { ...rec, devices: devs }, redis);
+  return { ok: true, removed: { id: String(removed.id || ''), label: String(removed.label || '') }, devices: devs.length, max: MAX_DEVICES };
+}

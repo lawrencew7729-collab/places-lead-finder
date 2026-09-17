@@ -12,8 +12,11 @@ import { getVercelOidcToken } from '@vercel/oidc';
 import { redisClient, tenantActiveSearchKey, tenantUsageKey, tenantConfigKey } from './redis.js';
 import { pacificBillingMonth, pacificBillingMonthStartUtc } from './billingMonth.js';
 import { SESSION_TTL_SECONDS, MAX_SESSION_REQUESTS } from './session.js';
-// v1.0.11 package/service contract — shared with /api/control (same pure module).
-import { parseTenantConfig, searchGate, publicState } from '../src/packageControl.js';
+// v1.0.12 — the device registry is validated on the SEARCH path too (a cleared
+// device is revoked immediately, not only at its next portal load/login).
+import { isDeviceAuthorized } from './device.js';
+// v1.0.11/v1.0.12 package/service contract — shared with /api/control (same pure module).
+import { parseTenantConfig, searchGate, publicState, packageSelectionFacts } from '../src/packageControl.js';
 
 const MONITORING_SCOPE = 'https://www.googleapis.com/auth/monitoring.read';
 // The STS federated token must carry cloud-platform: it is ONLY used to call
@@ -157,6 +160,22 @@ export function createUsageHandler(deps = {}) {
       // FAIL CLOSED: no Redis bridge/lease — RUN must not start.
       return res.status(503).json({ error: 'redis_unavailable', used: null, cap });
     }
+    // v1.0.12 — DEVICE REVOCATION ON THE SEARCH PATH. Clearing a device slot on
+    // the Dashboard must revoke that device immediately, so the registry is
+    // validated on EVERY run start (not only at portal load / login). FAIL CLOSED:
+    // a registry read failure blocks the run. `mode=peek` is the read-only display
+    // path and is deliberately NOT gated here.
+    if (!(req.query && req.query.mode === 'peek')) {
+      let device;
+      try {
+        device = await isDeviceAuthorized(redis, tenantId, req.query && req.query.deviceId);
+      } catch (e) {
+        return res.status(503).json({ error: 'device_check_failed', used: null, cap });
+      }
+      if (device.configured && !device.authorized) {
+        return res.status(403).json({ error: 'device_not_authorized', reason: 'DEVICE_NOT_AUTHORIZED', used: null, cap });
+      }
+    }
     let oidcToken;
     try {
       oidcToken = await oidcTokenProvider();
@@ -197,6 +216,13 @@ export function createUsageHandler(deps = {}) {
         serviceStatus: tenantConfig.serviceStatus,
         used: effectiveStart,
       });
+      // v1.0.11/v1.0.12 — the month-selection facts travel with the state so the
+      // Dashboard renders 500/900 from the authority, not from a duplicated rule.
+      const selectionFacts = packageSelectionFacts({
+        ...tenantConfig,
+        fallbackMonth: tenantConfig.updatedAt ? pacificBillingMonth(new Date(tenantConfig.updatedAt)) : null,
+        currentMonth: month,
+      });
       const baseState = {
         used: effectiveStart,
         cap,
@@ -206,6 +232,8 @@ export function createUsageHandler(deps = {}) {
         searchStop: gate.limit,
         portalVersion: publicState({ package: gate.package, serviceStatus: gate.serviceStatus, used: effectiveStart, month, ceiling: cap }).portalVersion,
         month,
+        packageMonth: selectionFacts.selectedMonth,
+        packageSelectableThisMonth: selectionFacts.isNewMonth,
         blocked: !gate.allowed,
         blockReason: gate.reason,
       };

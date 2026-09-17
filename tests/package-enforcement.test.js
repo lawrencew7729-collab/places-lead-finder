@@ -36,10 +36,18 @@ function fakeRes() {
   };
 }
 
-function handlerFor({ used, config }) {
+function handlerFor({ used, config, devices, devicesReadFails = false }) {
   const store = {};
   if (config) store[`tenant:${TENANT}:config`] = typeof config === 'string' ? config : JSON.stringify(config);
+  if (devices) store[`tenant:${TENANT}:devices`] = JSON.stringify({ devices });
   const redis = fakeRedis(store);
+  if (devicesReadFails) {
+    const realGet = redis.get;
+    redis.get = async (k) => {
+      if (String(k).endsWith(':devices')) throw new Error('redis down');
+      return realGet(k);
+    };
+  }
   const handler = createUsageHandler({
     oidcTokenProvider: async () => 'oidc-token',
     fetchImpl: fakeFetch(used),
@@ -63,7 +71,7 @@ const run = async (opts, query = {}) => {
 
 afterEach(() => { vi.unstubAllEnvs(); });
 
-describe('v1.0.11 server-side package enforcement (/api/usage)', () => {
+describe('v1.0.12 server-side package enforcement (/api/usage)', () => {
   it('A. STARTER_500: usage 499 allows a session; usage 500 blocks (no session issued)', async () => {
     vi.stubEnv('CUSTOMER_GOOGLE_PROJECT_ID', 'proj-x');
     process.env.CUSTOMER_GOOGLE_PROJECT_ID = 'proj-x';
@@ -117,7 +125,7 @@ describe('v1.0.11 server-side package enforcement (/api/usage)', () => {
     expect(r.res.body).toMatchObject({ peek: true, package: 'STARTER_500', blocked: false });
     expect('usage' in r.res.body).toBe(false);   // display field is `used`, never a package rename
     expect(r.res.body.used).toBe(12);
-    expect(r.res.body.portalVersion).toBe('1.0.11');
+    expect(r.res.body.portalVersion).toBe('1.0.12');
     expect(r.store[`tenant:${TENANT}:active_search`]).toBeUndefined();
     expect(r.store[`tenant:${TENANT}:config`]).toBeDefined();   // peek never rewrites state
   });
@@ -125,7 +133,9 @@ describe('v1.0.11 server-side package enforcement (/api/usage)', () => {
   it('FAIL CLOSED: an unreadable authoritative state returns 503 (never silently unenforced)', async () => {
     process.env.CUSTOMER_GOOGLE_PROJECT_ID = 'proj-x';
     const redis = fakeRedis({});
-    redis.get = async () => { throw new Error('redis read failed'); };
+    // only the CONFIG read fails — this asserts the authoritative-state fail-closed
+    // path (the device registry read is exercised in its own describe below)
+    redis.get = async (k) => { if (String(k).endsWith(':config')) throw new Error('redis read failed'); return null; };
     const handler = createUsageHandler({
       oidcTokenProvider: async () => 'oidc-token', fetchImpl: fakeFetch(0),
       monitoringSa: 'sa@example.iam.gserviceaccount.com', wifAudience: 'wif-audience',
@@ -136,5 +146,54 @@ describe('v1.0.11 server-side package enforcement (/api/usage)', () => {
     await handler({ method: 'GET', query: {}, headers: {} }, res);
     expect(res.statusCode).toBe(503);
     expect(res.body.error).toBe('state_unavailable');
+  });
+});
+
+describe('v1.0.12 DEVICE REVOCATION on the search path (/api/usage)', () => {
+  const REG = [
+    { id: 'd-auth1111', label: 'Edge · Windows', firstSeen: 1, lastSeen: 2 },
+    { id: 'd-auth2222', label: 'Chrome · macOS', firstSeen: 3, lastSeen: 4 },
+  ];
+  const base = { used: 10, config: { package: 'STARTER_500', serviceStatus: 'ACTIVE' }, devices: REG };
+
+  it('an authorized device runs as usual (session issued + lease held)', async () => {
+    const r = await run(base, { deviceId: 'd-auth1111' });
+    expect(r.res.statusCode).toBe(200);
+    expect(r.res.body.sessionId).toBe('session-1');
+    expect(r.store[`tenant:${TENANT}:active_search`]).toBeDefined();
+  });
+
+  it('a CLEARED device is REVOKED on its very next run: 403, no session, no lease', async () => {
+    const r = await run(base, { deviceId: 'd-cleared9' });   // its slot was cleared on the Dashboard
+    expect(r.res.statusCode).toBe(403);
+    expect(r.res.body).toMatchObject({ error: 'device_not_authorized', reason: 'DEVICE_NOT_AUTHORIZED' });
+    expect(r.res.body.sessionId).toBeUndefined();
+    expect(r.store[`tenant:${TENANT}:active_search`]).toBeUndefined();
+  });
+
+  it('a missing device id is refused once the lock is in use (fail closed)', async () => {
+    const r = await run(base, {});
+    expect(r.res.statusCode).toBe(403);
+    expect(r.res.body.reason).toBe('DEVICE_NOT_AUTHORIZED');
+  });
+
+  it('a tenant that has not locked any device yet is NOT blocked (first-device onboarding)', async () => {
+    const r = await run({ used: 10, config: { package: 'STARTER_500', serviceStatus: 'ACTIVE' } }, { deviceId: 'd-brandnew' });
+    expect(r.res.statusCode).toBe(200);
+    expect(r.res.body.sessionId).toBe('session-1');
+  });
+
+  it('mode=peek stays the read-only display path and is never device-gated', async () => {
+    const r = await run(base, { mode: 'peek', deviceId: 'd-cleared9' });
+    expect(r.res.statusCode).toBe(200);
+    expect(r.res.body).toMatchObject({ peek: true, package: 'STARTER_500' });
+    expect(r.store[`tenant:${TENANT}:active_search`]).toBeUndefined();
+  });
+
+  it('a registry read failure blocks the run (never silently allow)', async () => {
+    const r = await run({ ...base, devicesReadFails: true }, { deviceId: 'd-auth1111' });
+    expect(r.res.statusCode).toBe(503);
+    expect(r.res.body.error).toBe('device_check_failed');
+    expect(r.store[`tenant:${TENANT}:active_search`]).toBeUndefined();
   });
 });
