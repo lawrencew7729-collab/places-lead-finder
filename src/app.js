@@ -205,7 +205,7 @@ try { plfAuthed = sessionStorage.getItem('plf_ok') === '1'; } catch (e) {}
    login gate, because the sales staff share ONE access code and the point of the
    demo is that anyone with the code can log in from any device. The device gate
    therefore never auto-enters the app. */
-(fetch('/api/device?mode=config', { cache: 'no-store' })
+fetch('/api/device?mode=config', { cache: 'no-store' })
   .then((r) => (r.ok ? r.json() : null))
   .catch(() => null)
   .then((cfg) => {
@@ -219,7 +219,7 @@ try { plfAuthed = sessionStorage.getItem('plf_ok') === '1'; } catch (e) {}
         else if (j.reason === 'limit') showLogin('limit');
       })
       .catch(() => { /* keep login visible on network failure */ });
-  }))();
+  });
 
 /* ================= domain check ================= */
 const onOfficialDomain = EXPECTED_ORIGINS.includes(location.origin);
