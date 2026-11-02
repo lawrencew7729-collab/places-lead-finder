@@ -164,6 +164,9 @@ export function createDeviceHandler(deps = {}) {
         case 'check':      return await handleCheck(req, res, key, req.query.id, redis);
         case 'register':   return await handleRegister(req, res, key, req.query.id, redis);
         case 'probe':      return await handleProbe(req, res, key, redis);
+        /* DEMO BUILD: non-secret capability probe — the portal uses it to decide
+           whether to always show the login gate (shared salesman access code). */
+        case 'config':     return res.json({ demoUnlimited: DEMO_UNLIMITED_DEVICES, maxDevices: MAX_DEVICES });
         default:           return res.status(400).json({ error: 'unknown mode' });
       }
     } catch (err) {

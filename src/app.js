@@ -200,17 +200,26 @@ async function doLogin() {
 let plfAuthed = false;
 try { plfAuthed = sessionStorage.getItem('plf_ok') === '1'; } catch (e) {}
 
-/* boot: check this device against the server whitelist */
-(async function boot() {
-  if (plfAuthed) { enterApp(); return; }
-  showLogin();
-  try {
-    const r = await fetch('/api/device?mode=check&id=' + encodeURIComponent(DEVICE_ID), { cache: 'no-store' });
-    const j = await r.json();
-    if (j.allowed) enterApp();
-    else if (j.reason === 'limit') showLogin('limit');
-  } catch (e) { /* keep login visible on network failure */ }
-})();
+/* boot: check this device against the server whitelist
+   DEMO BUILD (branch: demo-salesman) — the apex demo portal must always show the
+   login gate, because the sales staff share ONE access code and the point of the
+   demo is that anyone with the code can log in from any device. The device gate
+   therefore never auto-enters the app. */
+(fetch('/api/device?mode=config', { cache: 'no-store' })
+  .then((r) => (r.ok ? r.json() : null))
+  .catch(() => null)
+  .then((cfg) => {
+    if (cfg && cfg.demoUnlimited) { showLogin(); return; }
+    if (plfAuthed) { enterApp(); return; }
+    showLogin();
+    fetch('/api/device?mode=check&id=' + encodeURIComponent(DEVICE_ID), { cache: 'no-store' })
+      .then((r) => r.json())
+      .then((j) => {
+        if (j.allowed) enterApp();
+        else if (j.reason === 'limit') showLogin('limit');
+      })
+      .catch(() => { /* keep login visible on network failure */ });
+  }))();
 
 /* ================= domain check ================= */
 const onOfficialDomain = EXPECTED_ORIGINS.includes(location.origin);
