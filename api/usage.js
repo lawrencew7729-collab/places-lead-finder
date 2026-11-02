@@ -155,24 +155,12 @@ export function createUsageHandler(deps = {}) {
     const projectId = process.env.CUSTOMER_GOOGLE_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT_ID || '';
     /* DEMO BUILD (branch: demo-salesman) — the apex demo portal is not a
        provisioned tenant: it has no WIF audience and no Google project, so LIVE
-       monitoring is unavailable by design. The demo must still show its package
-       search stop (900) and allow RUN, so a read-only peek AND the run-start
-       gate report the approved package + APP-LOCAL usage instead of 503.
-       A real customer portal never sets DEMO_NO_LIVE_MONITORING. */
-    if (process.env.DEMO_NO_LIVE_MONITORING === '1' && (!audience || !projectId || !tenantId)) {
-      const tenantConfigMemo = req.query && req.query.mode === 'peek';
-      return res.status(200).json({
-        used: null,
-        cap,
-        source: 'app-local',
-        peek: tenantConfigMemo,
-        package: 'FULL_900',
-        serviceStatus: 'ACTIVE',
-        searchStop: 900,
-        demoNoLiveMonitoring: true,
-      });
-    }
-    if (!audience || !projectId || !tenantId) {
+       monitoring is unavailable by design. DEMO_NO_LIVE_MONITORING=1 keeps the
+       normal session/lease/package flow (Redis is configured) and simply skips
+       the Google Monitoring read, using 0 as the usage baseline (APP-LOCAL).
+       A real customer portal never sets this. */
+    const demoLocal = process.env.DEMO_NO_LIVE_MONITORING === '1';
+    if (!demoLocal && (!audience || !projectId || !tenantId)) {
       return res.status(503).json({ error: 'not_configured', used: null, cap });
     }
     if (!redis.configured()) {
@@ -196,20 +184,25 @@ export function createUsageHandler(deps = {}) {
       }
     }
     let oidcToken;
-    try {
-      oidcToken = await oidcTokenProvider();
-    } catch (e) {
-      return res.status(503).json({ error: 'oidc_unavailable', used: null, cap });
-    }
-    if (!oidcToken) {
-      return res.status(503).json({ error: 'not_configured', used: null, cap });
+    if (!demoLocal) {
+      try {
+        oidcToken = await oidcTokenProvider();
+      } catch (e) {
+        return res.status(503).json({ error: 'oidc_unavailable', used: null, cap });
+      }
+      if (!oidcToken) {
+        return res.status(503).json({ error: 'not_configured', used: null, cap });
+      }
     }
     try {
       // 1. ONE latest-available Google Monitoring snapshot (broad Places count).
       //    v1.0.6 two-stage auth: STS federated token -> IAMCredentials SA token.
-      const federated = await exchangeForFederatedToken(oidcToken, audience, fetchImpl);
-      const saToken = await generateSaAccessToken(federated, sa, fetchImpl);
-      const monitoringUsed = await getPlacesUsage(saToken, projectId, fetchImpl, now());
+      let monitoringUsed = 0;
+      if (!demoLocal) {
+        const federated = await exchangeForFederatedToken(oidcToken, audience, fetchImpl);
+        const saToken = await generateSaAccessToken(federated, sa, fetchImpl);
+        monitoringUsed = await getPlacesUsage(saToken, projectId, fetchImpl, now());
+      }
       // 2. tenant Redis usage bridge (covers Monitoring propagation delay);
       //    server-authoritative Pacific billing month (never client-supplied).
       const month = pacificBillingMonth(now());
