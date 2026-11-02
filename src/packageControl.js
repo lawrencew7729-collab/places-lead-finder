@@ -45,7 +45,11 @@ export const PACKAGE_STOPS = Object.freeze({
   FULL_900: 900,
 });
 
-export const DEFAULT_PACKAGE = PACKAGE_STARTER;
+/* DEMO BUILD (branch: demo-salesman) — the apex demo portal has no control-plane
+   package row, so the "missing key" default would otherwise be STARTER_500 and
+   the demo would stop at 500. The demo runs on the approved 900 stop instead.
+   NEVER merge this into a Golden release: a real customer must start at 500. */
+export const DEFAULT_PACKAGE = PACKAGE_FULL;
 export const DEFAULT_SERVICE_STATUS = SERVICE_ACTIVE;
 
 /** The exact month format STATUS already reports (`month`). */

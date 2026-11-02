@@ -35,6 +35,25 @@ import { redisClient, tenantDevicesKey } from './redis.js';
 
 export const MAX_DEVICES = 2;          // 一账号 2 台设备
 
+/* ============================================================
+   DEMO BUILD — SALESMAN DEMO ONLY (branch: demo-salesman)
+
+   This branch is deployed ONLY to the apex leadfinder.business demo portal
+   so that an unlimited number of sales staff can log in from any device.
+
+   WHAT IT CHANGES (and nothing else):
+     - an unknown device is ALLOWED (no 2-slot registry limit is enforced)
+     - the search path does not require this device to hold a slot
+   WHAT IT DOES NOT CHANGE:
+     - APP_PASS is still required to log in (no anonymous access)
+     - the device registry is still recorded/visible for staff reporting
+     - the Golden release (tag customer-app-v1.0.12) is untouched
+
+   NEVER merge this into a Golden release. A real customer portal must keep the
+   2-device contract.
+   ============================================================ */
+export const DEMO_UNLIMITED_DEVICES = true;
+
 /** Immutable registry identity. Missing tenant id → fail closed. */
 function accountKey() {
   const tid = process.env.CUSTOMER_TENANT_ID;
@@ -82,6 +101,10 @@ async function handleCheck(req, res, key, id, redis) {
     await kvSet(key, rec, redis);
     return res.json({ allowed: true, devices: devs.length, max: MAX_DEVICES });
   }
+  // DEMO BUILD: an unknown device is allowed (no slot limit for sales demos).
+  if (DEMO_UNLIMITED_DEVICES) {
+    return res.json({ allowed: true, demoUnlimited: true, devices: devs.length, max: MAX_DEVICES });
+  }
   return res.json({ allowed: false, reason: 'not_registered', devices: devs.length, max: MAX_DEVICES });
 }
 
@@ -102,7 +125,7 @@ async function handleRegister(req, res, key, id, redis) {
     known.lastSeen = Date.now();
     if (req.body && req.body.label) known.label = req.body.label;
   } else {
-    if (devs.length >= MAX_DEVICES) {
+    if (!DEMO_UNLIMITED_DEVICES && devs.length >= MAX_DEVICES) {
       return res.json({
         allowed: false,
         reason: 'limit',
@@ -186,6 +209,8 @@ export async function loadDeviceRegistry(redis, tenantId) {
  */
 export async function isDeviceAuthorized(redis, tenantId, deviceId) {
   const reg = await loadDeviceRegistry(redis, tenantId);
+  // DEMO BUILD: the search path never requires a registered slot.
+  if (DEMO_UNLIMITED_DEVICES) return { configured: true, authorized: true, demoUnlimited: true };
   if (!reg.configured) return { configured: false, authorized: false };
   if (!reg.devices.length) return { configured: true, authorized: true };
   const id = String(deviceId || '');
