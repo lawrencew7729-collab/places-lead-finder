@@ -153,6 +153,25 @@ export function createUsageHandler(deps = {}) {
     const audience = wifAudience || process.env.WIF_AUDIENCE || '';
     const cap = getMonthlyTarget(monthlyTarget);
     const projectId = process.env.CUSTOMER_GOOGLE_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT_ID || '';
+    /* DEMO BUILD (branch: demo-salesman) — the apex demo portal is not a
+       provisioned tenant: it has no WIF audience and no Google project, so LIVE
+       monitoring is unavailable by design. The demo must still show its package
+       search stop (900) and allow RUN, so a read-only peek AND the run-start
+       gate report the approved package + APP-LOCAL usage instead of 503.
+       A real customer portal never sets DEMO_NO_LIVE_MONITORING. */
+    if (process.env.DEMO_NO_LIVE_MONITORING === '1' && (!audience || !projectId || !tenantId)) {
+      const tenantConfigMemo = req.query && req.query.mode === 'peek';
+      return res.status(200).json({
+        used: null,
+        cap,
+        source: 'app-local',
+        peek: tenantConfigMemo,
+        package: 'FULL_900',
+        serviceStatus: 'ACTIVE',
+        searchStop: 900,
+        demoNoLiveMonitoring: true,
+      });
+    }
     if (!audience || !projectId || !tenantId) {
       return res.status(503).json({ error: 'not_configured', used: null, cap });
     }
