@@ -13,7 +13,7 @@
    - All operations use ONLY the customer's own restricted ACL credential
      (~tenant:<TENANT_ID>:* + minimal command allowlist).
    ============================================================ */
-import { redisClient, tenantActiveSearchKey, tenantUsageKey } from './redis.js';
+import { redisClient, tenantActiveSearchKey, tenantDemoSearchKey, tenantUsageKey } from './redis.js';
 import { pacificBillingMonth } from './billingMonth.js';
 
 export const SESSION_TTL_SECONDS = 120;
@@ -58,7 +58,11 @@ export function createSessionHandler(deps = {}) {
     if (!redis.configured()) return res.status(503).json({ error: 'not_configured' });
     const mode = req.query && req.query.mode;
     const sessionId = req.query && req.query.sessionId ? String(req.query.sessionId) : '';
-    const leaseKey = tenantActiveSearchKey(tenantId);
+    /* DEMO BUILD: the demo portal runs a PER-SESSION lease so concurrent salesman
+       devices never lock each other out. Claim/release resolve the same key the
+       RUN start created; status falls back to the legacy single-lease key. */
+    const demoLease = process.env.DEMO_NO_LIVE_MONITORING === '1' && Boolean(sessionId);
+    const leaseKey = demoLease ? tenantDemoSearchKey(tenantId, sessionId) : tenantActiveSearchKey(tenantId);
     // Server-authoritative Pacific billing month, resolved PER REQUEST — a
     // session crossing the Pacific midnight boundary attributes each request
     // to the month it actually lands in (never client-supplied).

@@ -21,6 +21,15 @@ export function tenantActiveSearchKey(tenantId) {
   return `tenant:${tenantId}:active_search`;
 }
 
+/* DEMO BUILD (branch: demo-salesman) — the apex demo portal is shared by many
+   sales staff at once, so the single-active-device lease must not lock them out
+   of each other. The demo uses a PER-SESSION lease key instead: each RUN gets its
+   own lease, so concurrent devices search in parallel while the shared usage
+   counter (900 stop) still applies fleet-wide. Customer portals never use this. */
+export function tenantDemoSearchKey(tenantId, sessionId) {
+  return `tenant:${tenantId}:active_search:session:${sessionId}`;
+}
+
 export function tenantUsageKey(tenantId, month) {
   return `tenant:${tenantId}:usage:${month}`;
 }

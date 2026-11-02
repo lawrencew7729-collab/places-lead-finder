@@ -9,7 +9,7 @@
 // Text Search Enterprise / billing-SKU usage.
 // ESM format (matches root package.json "type": "module").
 import { getVercelOidcToken } from '@vercel/oidc';
-import { redisClient, tenantActiveSearchKey, tenantUsageKey, tenantConfigKey } from './redis.js';
+import { redisClient, tenantActiveSearchKey, tenantDemoSearchKey, tenantUsageKey, tenantConfigKey } from './redis.js';
 import { pacificBillingMonth, pacificBillingMonthStartUtc } from './billingMonth.js';
 import { SESSION_TTL_SECONDS, MAX_SESSION_REQUESTS } from './session.js';
 // v1.0.12 — the device registry is validated on the SEARCH path too (a cleared
@@ -274,7 +274,10 @@ export function createUsageHandler(deps = {}) {
         attempts: 0,
         acquiredAt: Date.now(),
       });
-      const acquired = await redis.set(leaseKey, lease, 'EX', String(SESSION_TTL_SECONDS), 'NX');
+      /* DEMO BUILD: per-session lease — concurrent salesman devices must not lock
+         each other out. The shared usage counter still enforces the 900 stop. */
+      const acquireKey = demoLocal ? tenantDemoSearchKey(tenantId, sessionId) : leaseKey;
+      const acquired = await redis.set(acquireKey, lease, 'EX', String(SESSION_TTL_SECONDS), 'NX');
       if (acquired !== 'OK') {
         // 6. another device holds an active search lease.
         return res.json({ ...baseState, locked: true });
